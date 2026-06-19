@@ -1,0 +1,94 @@
+# === PATIENT DATA - NEVER COMMIT ===
+*.dcm
+*.DCM
+*.IMA
+*.nii
+*.nii.gz
+*.nrrd
+*.mha
+*.mhd
+DICOMOBJ/
+DICOMDIR
+Syn*/
+SynapseMediaSets/
+data/
+patient_data/
+test_patients/
+
+# === BUILD ARTIFACTS ===
+build/
+dist/
+*.egg-info/
+*.dmg
+*.pkg
+
+# === PYTHON ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# === VIRTUAL ENVS ===
+venv/
+env/
+.venv/
+.env/
+
+# === ARCHIVED / BACKUP ===
+_archived_backups/
+*.bak
+*_backup.py
+*_backup_*.py
+*.tmp
+*.spec.tmp
+
+# === MUSCLEMAP WEIGHTS (large, downloaded separately) ===
+*.pth
+!**/.gitkeep
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# === OUTPUT FILES ===
+*.pdf
+*.xlsx
+!docs/examples/*.pdf
+!docs/examples/*.xlsx
+results/
+SpinoSarc_*.pdf
+SpinoSarc_*.xlsx
+
+# === LOGS ===
+*.log
+
+# === WORK DIRS ===
+SpinoSarc_work/
+
+# === LOCAL DEV / PRIVATE ===
+SpinoSarc_Patient*.pdf
+data/
+results/
+src/
+docs/screenshots/
+
+# === BACKUP/WIP ===
+*.WORKING_VERSION
+*.NEW_with_excel
+*.before_i18n
+spinosarc_app/*.bak*
+spinosarc_app/*_backup*.py
+
+# === Docs - private development notes ===
+docs/

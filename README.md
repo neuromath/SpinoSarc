@@ -1,0 +1,162 @@
+# SpinoSarc
+
+**An open-source desktop tool for quantitative paraspinal muscle and dural sac analysis on lumbar spine MRI.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011%2B-blue)](https://www.apple.com/macos/)
+[![Research Use Only](https://img.shields.io/badge/Use-Research%20Only-red)](DISCLAIMER.md)
+
+> ⚠️ **Research use only.** SpinoSarc has not received FDA, CE, or any other regulatory approval. It must not be used for clinical decision-making. See [DISCLAIMER.md](DISCLAIMER.md).
+
+---
+
+## Overview
+
+SpinoSarc is a native macOS application for automated quantitative analysis of paraspinal musculature and dural sac on lumbar spine MRI. It provides an end-to-end workflow from DICOM ingestion to PDF/Excel reporting, fully offline.
+
+**Key features:**
+
+- 🗂️ **DICOM ingestion** with multi-vendor support (Siemens, Philips, GE) including JPEG Lossless decompression
+- 🧠 **Paraspinal muscle segmentation** via the [MuscleMap](https://github.com/MuscleMap) U-Net backbone — 8 muscle classes (multifidus, erector spinae, psoas, quadratus lumborum; left and right)
+- 📐 **Quantitative metrics**: cross-sectional area (CSA), fat fraction, total psoas area (TPA), psoas muscle index (PMI)
+- 🩺 **Manual dural sac CSA** measurement via interactive polygon ROI
+- 📊 **Reference values** from published literature (Hamaguchi 2016, Englesbe 2010, Barz 2010) — for context, not classification
+- 📄 **Single-page PDF report** and **Excel export** for downstream analysis
+- 🔒 **Fully offline** — no data leaves the device
+- 🌐 **Bilingual UI**: English and Turkish
+
+## Installation
+
+### macOS (Apple Silicon: M1, M2, M3, M4)
+
+1. Download the latest release `SpinoSarc-X.Y.Z.dmg` from the [Releases](https://github.com/neuromath/spinosarc/releases) page.
+2. Open the `.dmg` file.
+3. Drag **SpinoSarc.app** to the `Applications` folder.
+4. **First launch only**: Right-click SpinoSarc.app in Applications → "Open" → "Open" again (to bypass macOS Gatekeeper, as the app is not code-signed).
+
+**System requirements:**
+
+- macOS 11.0 (Big Sur) or later
+- Apple Silicon Mac (M1 / M2 / M3 / M4)
+- ~2 GB free disk space
+- No internet connection required
+
+### From source (developers)
+
+```bash
+git clone https://github.com/neuromath/spinosarc.git
+cd spinosarc
+conda create -n spinosarc python=3.11
+conda activate spinosarc
+conda install -c conda-forge dcm2niix
+pip install -r requirements.txt
+
+# Clone MuscleMap separately (segmentation backbone)
+git clone https://github.com/MuscleMap/MuscleMap.git ~/SpinoSarc/MuscleMap
+
+# Run from source
+python -m spinosarc_app.gui
+```
+
+## Quick Start
+
+1. **Launch SpinoSarc**
+2. **Drag a lumbar MR DICOM folder** (or NIfTI files) onto the drop zone
+3. **Navigate axial and sagittal sliders** to select the slice of interest
+4. **(Optional)** Draw a polygon ROI on the dural sac for stenosis assessment
+5. **Enter patient demographics** (optional, used for PMI calculation)
+6. **Click "Analyze"** — segmentation runs in ~10-30 seconds on Apple Silicon
+7. **Export** results as PDF (single-page report) or Excel (detailed metrics)
+8. **Click "New Case"** to clear and start over
+
+## What SpinoSarc Reports
+
+For each analyzed slice:
+
+| Metric | Description |
+|---|---|
+| Per-muscle CSA (mm²) | Cross-sectional area for each of 8 muscles |
+| Per-muscle fat fraction (%) | Intensity-based fat estimate |
+| Total Psoas Area (cm²) | Sum of left + right psoas CSA |
+| Psoas Muscle Index (cm²/m²) | TPA normalized by patient height (if provided) |
+| Dural Sac CSA (mm²) | From manual polygon ROI (if drawn) |
+
+Reference cut-off values from the literature are displayed for context but **no automated risk classification** is performed.
+
+## How It Differs From MuscleMap
+
+SpinoSarc uses [MuscleMap](https://github.com/MuscleMap) as its segmentation engine. The contribution of SpinoSarc is the **clinical research infrastructure surrounding the segmentation**:
+
+- DICOM ingestion (MuscleMap requires NIfTI)
+- Anatomical coordinate alignment between axial and sagittal series
+- Quantitative metric extraction with literature reference values
+- Manual ROI for dural sac
+- Single-page PDF / Excel reporting
+- Native macOS desktop application — no programming required
+- Bilingual interface
+
+## Citation
+
+If you use SpinoSarc in your research, please cite:
+
+```bibtex
+@software{yilmaz2026spinosarc,
+  author       = {Yılmaz, Berkay},
+  title        = {SpinoSarc: An open-source tool for quantitative
+                  paraspinal muscle and dural sac analysis on lumbar
+                  spine MRI},
+  year         = {2026},
+  url          = {https://github.com/neuromath/spinosarc},
+  version      = {0.1.0},
+  orcid        = {0009-0006-3108-8991}
+}
+```
+
+Please also cite the underlying segmentation backbone:
+
+```bibtex
+@software{musclemap,
+  author = {{MuscleMap contributors}},
+  title  = {MuscleMap: Open-source skeletal muscle segmentation},
+  url    = {https://github.com/MuscleMap/MuscleMap}
+}
+```
+
+## License
+
+SpinoSarc is released under the [MIT License](LICENSE).
+
+Third-party components are distributed under their respective licenses; see [LICENSE](LICENSE) for the full list.
+
+## Acknowledgments
+
+- **MuscleMap** team for the open-source segmentation backbone
+- **MONAI** and **PyTorch** communities
+- **dcm2niix** (Chris Rorden) for robust DICOM-to-NIfTI conversion
+- **Cerrahpaşa Faculty of Medicine** for clinical context
+- **Reference literature**:
+  - Barz T et al. (2010) — Dural sac CSA thresholds
+  - Hamaguchi Y et al. (2016) — PMI reference values
+  - Englesbe MJ et al. (2010) — Psoas area in surgical risk
+
+## Author
+
+**Berkay Yılmaz**
+Radiology Resident, Cerrahpaşa Faculty of Medicine
+Istanbul University-Cerrahpaşa, Istanbul, Turkey
+ORCID: [0009-0006-3108-8991](https://orcid.org/0009-0006-3108-8991)
+GitHub: [@neuromath](https://github.com/neuromath)
+
+## Contributing
+
+Issues and pull requests are welcome. Please open a GitHub issue for bug reports or feature requests.
+
+For substantive contributions, please ensure:
+
+- No patient data is committed (see `.gitignore`)
+- Code is documented in English
+- Changes are tested on at least one public dataset (e.g., RSNA 2024 Lumbar Spine)
+
+## Disclaimer
+
+**Research use only.** See [DISCLAIMER.md](DISCLAIMER.md) for full terms.

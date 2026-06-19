@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use SpinoSarc in your research, please cite it as below."
+title: "SpinoSarc: An open-source tool for quantitative paraspinal muscle and dural sac analysis on lumbar spine MRI"
+abstract: >-
+  SpinoSarc is a native macOS desktop application providing an
+  end-to-end pipeline for quantitative analysis of paraspinal
+  musculature and dural sac on lumbar spine MRI. It supports DICOM
+  ingestion from multiple vendors (Siemens, Philips, GE), automatic
+  segmentation of eight paraspinal muscles via the MuscleMap U-Net
+  backbone, computation of established sarcopenia metrics (cross-
+  sectional area, fat fraction, total psoas area, psoas muscle index),
+  manual dural sac cross-sectional area measurement, and one-click
+  PDF and Excel report generation. SpinoSarc operates fully offline
+  and is intended for research use only.
+authors:
+  - family-names: Yilmaz
+    given-names: Berkay
+    affiliation: "Department of Radiology, Cerrahpaşa Faculty of Medicine"
+version: "0.1.0"
+date-released: "2026-06-10"
+license: MIT
+repository-code: "https://github.com/<your-username>/spinosarc"
+keywords:
+  - medical imaging
+  - lumbar spine
+  - paraspinal muscle
+  - sarcopenia
+  - segmentation
+  - MRI
+  - radiology
+  - open-source
+  - research tool
