@@ -2,6 +2,7 @@
 
 **An open-source desktop tool for quantitative paraspinal muscle and dural sac analysis on lumbar spine MRI.**
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20760332.svg)](https://doi.org/10.5281/zenodo.20760332)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011%2B-blue)](https://www.apple.com/macos/)
 [![Research Use Only](https://img.shields.io/badge/Use-Research%20Only-red)](DISCLAIMER.md)
@@ -107,8 +108,9 @@ If you use SpinoSarc in your research, please cite:
                   paraspinal muscle and dural sac analysis on lumbar
                   spine MRI},
   year         = {2026},
-  url          = {https://github.com/neuromath/spinosarc},
+  url          = {https://github.com/neuromath/SpinoSarc},
   version      = {0.1.0},
+  doi          = {10.5281/zenodo.20760332},
   orcid        = {0009-0006-3108-8991}
 }
 ```

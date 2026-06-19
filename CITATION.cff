@@ -17,6 +17,7 @@ authors:
     given-names: Berkay
     affiliation: "Department of Radiology, Cerrahpaşa Faculty of Medicine"
 version: "0.1.0"
+doi: 10.5281/zenodo.20760332
 date-released: "2026-06-10"
 license: MIT
 repository-code: "https://github.com/<your-username>/spinosarc"
