@@ -12,6 +12,12 @@
 
 ---
 
+## Screenshots
+
+![SpinoSarc GUI](docs/screenshots/gui.png)
+
+*Main application window: axial and sagittal viewers, patient demographics, dural sac ROI tool, and per-muscle analysis results.*
+
 ## Overview
 
 SpinoSarc is a native macOS application for automated quantitative analysis of paraspinal musculature and dural sac on lumbar spine MRI. It provides an end-to-end workflow from DICOM ingestion to PDF/Excel reporting, fully offline.

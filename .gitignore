@@ -81,7 +81,6 @@ SpinoSarc_Patient*.pdf
 data/
 results/
 src/
-docs/screenshots/
 
 # === BACKUP/WIP ===
 *.WORKING_VERSION
@@ -91,4 +90,9 @@ spinosarc_app/*.bak*
 spinosarc_app/*_backup*.py
 
 # === Docs - private development notes ===
-docs/
+# docs/ - sadece screenshots commit edilir, kalanlari ignore
+docs/private/
+docs/l4l5_extraction.csv
+docs/patient_id_map.csv
+docs/README.md
+docs/*.csv
