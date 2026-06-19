@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011%2B-blue)](https://www.apple.com/macos/)
 [![Research Use Only](https://img.shields.io/badge/Use-Research%20Only-red)](DISCLAIMER.md)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20760332.svg)](https://doi.org/10.5281/zenodo.20760332)
+
 
 > ⚠️ **Research use only.** SpinoSarc has not received FDA, CE, or any other regulatory approval. It must not be used for clinical decision-making. See [DISCLAIMER.md](DISCLAIMER.md).
 
