@@ -5,7 +5,7 @@ import numpy as np
 import nibabel as nib
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QSlider, QComboBox, QFileDialog, QFrame,
+    QPushButton, QLabel, QSlider, QComboBox, QFileDialog, QFrame, QListWidget,
     QGroupBox, QFormLayout, QMessageBox, QSplitter, QTableWidget,
     QTableWidgetItem, QHeaderView, QSpinBox, QLineEdit,
     QDialog, QDialogButtonBox,
@@ -44,8 +44,10 @@ class ImageDisplay(QLabel):
         self.setStyleSheet(f"background-color: black; border: 1px solid {TXT_LT};")
         self._img = None
         self._mask = None
+        self._canal_overlay = None
         self._line_y = None
         self._line_x = None
+        self._level_lines = []  # list of dicts: {y_frac, color_rgb, label, dashed}
         self._rotation = 0
         self._interactive_click = interactive_click
         self._roi_enabled = False
@@ -57,12 +59,20 @@ class ImageDisplay(QLabel):
         self.setMouseTracking(True)
 
     def set_image(self, img_array, overlay_mask=None,
-                  line_y_fraction=None, line_x_fraction=None, rotation=0):
+                  line_y_fraction=None, line_x_fraction=None, rotation=0,
+                  level_lines=None, canal_overlay=None):
         self._img = img_array
         self._mask = overlay_mask
+        self._canal_overlay = canal_overlay
         self._line_y = line_y_fraction
         self._line_x = line_x_fraction
+        if level_lines is not None:
+            self._level_lines = level_lines
         self._rotation = rotation
+        self._refresh()
+
+    def clear_level_lines(self):
+        self._level_lines = []
         self._refresh()
 
     def set_roi_enabled(self, on):
@@ -103,12 +113,46 @@ class ImageDisplay(QLabel):
                     continue
                 rgb[px] = (rgb[px]*0.45 + np.array(color)*0.55).astype(np.uint8)
 
+        # Canal (dural sac) overlay - cyan, semi-transparent
+        if self._canal_overlay is not None:
+            try:
+                canal = np.rot90(self._canal_overlay, k=self._rotation)
+                if canal.shape == norm.shape:
+                    canal_color = np.array([0, 200, 255])  # cyan
+                    px = canal > 0
+                    if px.sum() > 0:
+                        rgb[px] = (rgb[px]*0.50 + canal_color*0.50).astype(np.uint8)
+            except Exception:
+                pass
+
         if self._line_y is not None:
             ly = int(np.clip(self._line_y, 0.0, 1.0) * (h - 1))
             rgb[max(0,ly-1):ly+2, :] = [220, 38, 38]
         if self._line_x is not None:
             lx = int(np.clip(self._line_x, 0.0, 1.0) * (w - 1))
             rgb[:, max(0,lx-1):lx+2] = [220, 38, 38]
+
+        # Level lines (multi-line overlay, e.g. from TotalSpineSeg)
+        # Each entry: {"y_frac": float, "color_rgb": (r,g,b), "label": str, "dashed": bool}
+        for ll in self._level_lines:
+            try:
+                yf = float(ll.get("y_frac", 0.5))
+                color = ll.get("color_rgb", (255, 255, 0))
+                dashed = bool(ll.get("dashed", False))
+                ly = int(np.clip(yf, 0.0, 1.0) * (h - 1))
+                if dashed:
+                    # Dashed: write the color every N pixels along x
+                    dash_len = 8
+                    gap_len = 6
+                    period = dash_len + gap_len
+                    xs = np.arange(w)
+                    keep = (xs % period) < dash_len
+                    if 0 <= ly < h:
+                        rgb[ly, keep] = color
+                else:
+                    rgb[max(0, ly):min(h, ly + 2), :] = color
+            except Exception:
+                continue
 
         rgb = np.ascontiguousarray(rgb)
         qimg = QImage(rgb.tobytes(), w, h, w*3, QImage.Format.Format_RGB888)
@@ -119,6 +163,40 @@ class ImageDisplay(QLabel):
         self._pix_h = scaled.height()
         self._offset_x = (self.width() - self._pix_w) // 2
         self._offset_y = (self.height() - self._pix_h) // 2
+
+        # Draw level labels on the scaled pixmap
+        if self._level_lines:
+            painter = QPainter(scaled)
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            for ll in self._level_lines:
+                try:
+                    yf = float(ll.get("y_frac", 0.5))
+                    color = ll.get("color_rgb", (255, 255, 0))
+                    label_text = ll.get("label", "")
+                    if not label_text:
+                        continue
+                    # Map y_frac to pixmap y coordinate
+                    label_y = int(np.clip(yf, 0.0, 1.0) * (self._pix_h - 1))
+                    # Background rectangle for readability (semi-transparent black)
+                    fm = painter.fontMetrics()
+                    text_w = fm.horizontalAdvance(label_text)
+                    text_h = fm.height()
+                    pad = 3
+                    # Position label on the RIGHT edge of the pixmap
+                    rect_x = self._pix_w - text_w - 2 * pad - 2
+                    rect_y = label_y - text_h // 2
+                    # Clamp to keep label fully visible
+                    rect_y = max(0, min(self._pix_h - text_h, rect_y))
+                    painter.fillRect(rect_x, rect_y, text_w + 2 * pad, text_h,
+                                     QColor(0, 0, 0, 180))
+                    painter.setPen(QColor(*color))
+                    painter.drawText(rect_x + pad, rect_y + fm.ascent(), label_text)
+                except Exception:
+                    continue
+            painter.end()
 
         if self._roi_points:
             painter = QPainter(scaled)
@@ -549,35 +627,14 @@ class SpinoSarcWindow(QMainWindow):
         form.addRow("Height:", self.height_input); form.addRow("Weight:", self.weight_input)
         rlay.addWidget(demo_group)
 
-        roi_group = QGroupBox("Dural Sac CSA (manual ROI)")
+        roi_group = QGroupBox("Spinal Canal CSA (auto)")
         roi_group.setStyleSheet(self._gs())
         rl = QVBoxLayout(roi_group)
-        hint = QLabel("Left-click: add point  Right-click / double-click: close polygon")
+        hint = QLabel("Automatically segmented from TotalSpineSeg. "
+                      "Run Detect Levels, then Analyze.")
         hint.setStyleSheet("color: " + TXT_MD + "; font-size: 10px;")
         hint.setWordWrap(True)
         rl.addWidget(hint)
-        roi_btns = QHBoxLayout()
-        self.roi_draw_btn = QPushButton("Draw ROI")
-        self.roi_draw_btn.setCheckable(True)
-        self.roi_draw_btn.setEnabled(False)
-        self.roi_draw_btn.setStyleSheet(
-            "QPushButton { background-color: " + LIGHT + "; color: " + TXT_DK + "; "
-            "border: 1px solid " + TXT_LT + "; padding: 6px; border-radius: 6px; font-weight: 600; }"
-            "QPushButton:checked { background-color: " + ACCENT + "; color: white; }"
-            "QPushButton:disabled { color: " + TXT_LT + "; }"
-        )
-        self.roi_draw_btn.toggled.connect(self._on_roi_draw_toggled)
-        self.roi_clear_btn = QPushButton("Clear")
-        self.roi_clear_btn.setEnabled(False)
-        self.roi_clear_btn.setStyleSheet(
-            "QPushButton { background-color: " + LIGHT + "; color: " + DANGER + "; "
-            "border: 1px solid " + TXT_LT + "; padding: 6px; border-radius: 6px; font-weight: 600; }"
-            "QPushButton:disabled { color: " + TXT_LT + "; }"
-        )
-        self.roi_clear_btn.clicked.connect(self._on_roi_clear)
-        roi_btns.addWidget(self.roi_draw_btn)
-        roi_btns.addWidget(self.roi_clear_btn)
-        rl.addLayout(roi_btns)
         self.csa_label = QLabel("Dural sac CSA: -")
         self.csa_label.setStyleSheet("color: " + NAVY + "; font-size: 15px; font-weight: 700;")
         self.csa_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -587,6 +644,43 @@ class SpinoSarcWindow(QMainWindow):
         self.stenosis_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         rl.addWidget(self.stenosis_label)
         rlay.addWidget(roi_group)
+
+        # ------------------------------------------------------------------
+        # Lumbar Level Detection panel (TotalSpineSeg integration)
+        # ------------------------------------------------------------------
+        levels_group = QGroupBox("Lumbar Level Detection")
+        levels_group.setStyleSheet(self._gs())
+        ll = QVBoxLayout(levels_group)
+
+        self.detect_levels_btn = QPushButton("Detect Levels")
+        self.detect_levels_btn.setEnabled(False)
+        self.detect_levels_btn.setMinimumHeight(36)
+        self.detect_levels_btn.setStyleSheet(
+            "QPushButton { background-color: " + ACCENT + "; color: white; "
+            "font-size: 13px; font-weight: 700; border-radius: 6px; padding: 6px; }"
+            "QPushButton:hover:enabled { background-color: " + PRIMARY + "; }"
+            "QPushButton:disabled { background-color: " + TXT_LT + "; }"
+        )
+        self.detect_levels_btn.clicked.connect(self._on_detect_levels)
+        ll.addWidget(self.detect_levels_btn)
+
+        self.levels_status_label = QLabel("Load a case to enable level detection.")
+        self.levels_status_label.setStyleSheet("color: " + TXT_LT + "; font-size: 11px; font-style: italic;")
+        self.levels_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.levels_status_label.setWordWrap(True)
+        ll.addWidget(self.levels_status_label)
+
+        self.levels_list = QListWidget()
+        self.levels_list.setMaximumHeight(140)
+        self.levels_list.itemClicked.connect(self._on_level_item_clicked)
+        self.levels_list.setStyleSheet(
+            "QListWidget { background-color: " + LIGHT + "; "
+            "border: 1px solid " + TXT_LT + "; border-radius: 6px; font-size: 12px; }"
+        )
+        ll.addWidget(self.levels_list)
+
+        rlay.addWidget(levels_group)
+        # ------------------------------------------------------------------
 
         self.analyze_btn = QPushButton("Analyze")
         self.analyze_btn.setEnabled(False); self.analyze_btn.setMinimumHeight(48)
@@ -598,6 +692,21 @@ class SpinoSarcWindow(QMainWindow):
         )
         self.analyze_btn.clicked.connect(self._on_analyze)
         rlay.addWidget(self.analyze_btn)
+
+        self.analyze_all_btn = QPushButton("Analyze All Levels")
+        self.analyze_all_btn.setEnabled(False)
+        self.analyze_all_btn.setMinimumHeight(40)
+        self.analyze_all_btn.setStyleSheet(
+            "QPushButton { background-color: " + ACCENT + "; color: white; "
+            "border: none; border-radius: 8px; font-size: 14px; font-weight: 600; }"
+            "QPushButton:disabled { background-color: " + TXT_LT + "; }"
+        )
+        self.analyze_all_btn.setToolTip(
+            "Run muscle + dural sac analysis at every detected lumbar level. "
+            "Requires Detect Levels first."
+        )
+        self.analyze_all_btn.clicked.connect(self._on_analyze_all_levels)
+        rlay.addWidget(self.analyze_all_btn)
 
         self.results_group = QGroupBox("Analysis Results")
         self.results_group.setStyleSheet(self._gs())
@@ -666,6 +775,7 @@ class SpinoSarcWindow(QMainWindow):
         self.engine_status.setStyleSheet("color: " + SUCCESS + "; font-size: 11px; font-weight: 600;")
         if self.axial_data is not None or self.axial_slices:
             self.analyze_btn.setEnabled(True)
+            self.detect_levels_btn.setEnabled(True)
             self.new_case_btn.setEnabled(True)
 
     def _on_engine_error(self, err):
@@ -757,6 +867,7 @@ class SpinoSarcWindow(QMainWindow):
         # Load sagittal as NIfTI (legacy flow)
         if sag_nifti is not None:
             try:
+                self.sagittal_nifti_path = str(sag_nifti)
                 sag_img = nib.load(str(sag_nifti))
                 self.sagittal_data = sag_img.get_fdata()
                 self.sagittal_affine = sag_img.affine
@@ -776,6 +887,7 @@ class SpinoSarcWindow(QMainWindow):
                 self.sagittal_affine = None
         else:
             self.sagittal_data = None
+            self.sagittal_nifti_path = None
             self.sagittal_affine = None
             self.sag_slider.setEnabled(False)
             self.sag_slider.setRange(0, 0)
@@ -796,8 +908,7 @@ class SpinoSarcWindow(QMainWindow):
         # show GUI
         self.drop_zone.hide()
         self.viewer_widget.show()
-        self.roi_draw_btn.setEnabled(True)
-        self.roi_clear_btn.setEnabled(True)
+        pass  # manual ROI removed - canal is auto-segmented
         self._reset_csa_display()
 
         # initial render
@@ -816,6 +927,7 @@ class SpinoSarcWindow(QMainWindow):
             f"Loaded {n} DICOM slices (sorted by InstanceNumber). "
             f"Draw ROI, click Analyze.")
         self.new_case_btn.setEnabled(True)
+        self.detect_levels_btn.setEnabled(True)
         if self.analyzer is not None:
             self.analyze_btn.setEnabled(True)
 
@@ -870,6 +982,7 @@ class SpinoSarcWindow(QMainWindow):
                 self.axial_display.set_image(ax_arr[:, :, mid], rotation=self.axial_rotation)
 
             if sagittal_path is not None:
+                self.sagittal_nifti_path = sagittal_path
                 sag_img = nib.load(sagittal_path)
                 sag_arr = sag_img.get_fdata()
                 self.sagittal_data = sag_arr
@@ -899,8 +1012,6 @@ class SpinoSarcWindow(QMainWindow):
                 self.sag_lbl.setText("SAGITTAL")
 
             self.drop_zone.hide(); self.viewer_widget.show()
-            self.roi_draw_btn.setEnabled(True)
-            self.roi_clear_btn.setEnabled(True)
             self._reset_csa_display()
 
             zooms = ax_img.header.get_zooms()
@@ -911,6 +1022,7 @@ class SpinoSarcWindow(QMainWindow):
             self.file_info.setText(info)
             self.status_label.setText("File(s) loaded. Draw dural sac ROI, enter demographics, click Analyze.")
             self.new_case_btn.setEnabled(True)
+            self.detect_levels_btn.setEnabled(True)
             if self.analyzer is not None:
                 self.analyze_btn.setEnabled(True)
         except Exception as e:
@@ -1062,7 +1174,10 @@ class SpinoSarcWindow(QMainWindow):
             si_origin = sag_aff[2, 3]
             pixel_idx = (z_world_mm - si_origin) / si_step
             n_along = self.sagittal_data.shape[si_axis]
-            fraction = pixel_idx / (n_along - 1)
+            raw_fraction = pixel_idx / (n_along - 1)
+            # Invert to be consistent with _sagittal_yfrac_to_axial_slice:
+            # screen y=0 is TOP (cranial), so cranial z must give fraction=0.
+            fraction = 1.0 - raw_fraction
             return float(np.clip(fraction, 0.0, 1.0))
         except Exception:
             return 0.5
@@ -1080,7 +1195,12 @@ class SpinoSarcWindow(QMainWindow):
             si_step = sag_aff[2, si_axis]
             si_origin = sag_aff[2, 3]
             n_along = self.sagittal_data.shape[si_axis]
-            pixel_idx = y_frac * (n_along - 1)
+            # Screen y=0 is the TOP of the display = anatomical CRANIAL = high z.
+            # Empirically verified via debug logging:
+            # - y_frac=0.07 (top click)    -> needs voxel ~356 -> z=+167 (cranial OK)
+            # - y_frac=0.78 (bottom click) -> needs voxel  ~84 -> z=-45  (caudal OK)
+            # So y_frac must be inverted before mapping to voxel index.
+            pixel_idx = (1.0 - y_frac) * (n_along - 1)
             z_world_mm = si_origin + si_step * pixel_idx
 
             if self.axial_slices:
@@ -1122,6 +1242,30 @@ class SpinoSarcWindow(QMainWindow):
         if ax_idx is not None and ax_idx != self.current_slice_idx:
             self.slice_slider.setValue(ax_idx)
 
+    def _compute_canal_overlay_for_axial_slice(self, slice_idx):
+        """Return a 2D boolean mask of the canal at the given axial slice,
+        resampled to the axial DICOM grid using world-space coordinates."""
+        canal_path = getattr(self, "canal_nifti_path", None)
+        if not canal_path or not Path(canal_path).is_file():
+            return None
+        if not self.axial_slices:
+            return None
+        if slice_idx < 0 or slice_idx >= len(self.axial_slices):
+            return None
+        try:
+            from .totalspineseg.canal_csa import resample_canal_to_axial_slice
+            import numpy as _np
+            mask = resample_canal_to_axial_slice(
+                canal_path,
+                self.axial_slices[slice_idx],
+                threshold=0.5,
+            )
+            return mask
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"[CANAL OVERLAY] Error: {e}")
+            return None
+
     def _on_slider(self, value):
         # iki mode'u da destekle
         if self.axial_slices:
@@ -1136,6 +1280,30 @@ class SpinoSarcWindow(QMainWindow):
         self._reset_csa_display()
         self.active_panel = 'axial'
         self._update_locators()
+        # Re-render axial with canal overlay (if Detect Levels has been run)
+        self._refresh_axial_with_canal_overlay()
+
+    def _refresh_axial_with_canal_overlay(self):
+        """Re-render the current axial slice, adding the canal mask overlay
+        if a canal NIfTI has been loaded by Detect Levels."""
+        if not self.axial_slices:
+            return
+        idx = self.current_slice_idx
+        if idx < 0 or idx >= len(self.axial_slices):
+            return
+        canal_mask = self._compute_canal_overlay_for_axial_slice(idx)
+        if canal_mask is None:
+            return  # no canal data, leave existing display alone
+        # Re-display current axial slice with canal overlay
+        try:
+            img = self.axial_slices[idx]["pixel_array"]
+            self.axial_display.set_image(
+                img,
+                rotation=self.axial_rotation,
+                canal_overlay=canal_mask,
+            )
+        except Exception as e:
+            print(f"[CANAL OVERLAY] re-render failed: {e}")
 
     def _on_roi_draw_toggled(self, checked):
         self.axial_display.set_roi_enabled(checked)
@@ -1193,9 +1361,406 @@ class SpinoSarcWindow(QMainWindow):
             return Demographics(age=age, sex=sex, height_cm=h, weight_kg=w)
         return None
 
+    def _on_level_item_clicked(self, item):
+        """Jump axial slider to the level's axial slice.
+
+        Items for OUT-OF-RANGE levels carry no UserRole data, so clicking
+        them is a no-op (the level is not covered by the axial volume).
+        """
+        ax_idx = item.data(Qt.ItemDataRole.UserRole)
+        if ax_idx is None:
+            return
+        try:
+            ax_idx = int(ax_idx)
+        except (TypeError, ValueError):
+            return
+        # Slider triggers _on_slider, which updates current_slice_idx and refreshes display.
+        self.slice_slider.setValue(ax_idx)
+
+    def _on_detect_levels(self):
+        """Run TotalSpineSeg on the current sagittal NIfTI, parse levels,
+        map to axial slices, and populate the levels list.
+
+        WARNING: This runs synchronously - the GUI will freeze for ~60 seconds
+        while TotalSpineSeg performs inference. A future version will move
+        this to a QThread worker.
+        """
+        from PyQt6.QtWidgets import QMessageBox, QListWidgetItem
+        from PyQt6.QtGui import QColor
+
+        # ---- Sanity checks ----
+        if not self.axial_slices:
+            QMessageBox.warning(
+                self, "Detect Levels",
+                "Lumbar level detection requires a DICOM case to be loaded.",
+            )
+            return
+
+        # We need a sagittal NIfTI on disk. SpinoSarc already produces one
+        # at load time via dcm2niix; that path is stored in self.sagittal_path
+        # (NIfTI mode) or self.sagittal_nifti_for_tss (set by the DICOM loader).
+        sag_nifti = getattr(self, 'sagittal_nifti_path', None)
+        if not sag_nifti or not Path(sag_nifti).is_file():
+            QMessageBox.critical(
+                self, "Detect Levels",
+                "Could not locate a sagittal NIfTI file for this case.\n"
+                "Make sure both axial and sagittal series are loaded.",
+            )
+            return
+
+        # ---- Lazy import (avoid GUI import overhead on startup) ----
+        from .totalspineseg.runner import TotalSpineSegRunner
+        from .totalspineseg.level_mapper import LevelMapper
+
+        runner = TotalSpineSegRunner()
+        if not runner.is_available():
+            QMessageBox.critical(
+                self, "Detect Levels",
+                "TotalSpineSeg is not available.\n\n"
+                "Make sure the `totalspineseg` conda environment is installed.",
+            )
+            return
+
+        # ---- Run (blocking) ----
+        self.detect_levels_btn.setEnabled(False)
+        self.detect_levels_btn.setText("Detecting...")
+        self.levels_status_label.setText(
+            "Running TotalSpineSeg (this takes ~60 seconds on Apple Silicon)..."
+        )
+        self.levels_list.clear()
+        QApplication.processEvents()
+
+        out_dir = str(Path(tempfile.gettempdir()) / "spinosarc_tss_output")
+        # Clean stale output from prior runs (avoids picking the wrong canal
+        # NIfTI when a different sagittal series was processed earlier).
+        try:
+            import shutil
+            if Path(out_dir).exists():
+                shutil.rmtree(out_dir)
+        except Exception as _e:
+            print(f"[TSS] Could not clean out_dir: {_e}")
+        try:
+            print(f"[TSS] Running on {sag_nifti}")
+            result = runner.run(
+                sagittal_nifti_path=sag_nifti,
+                output_dir=out_dir,
+                device="mps",
+                step1_only=True,
+                iso=True,
+                progress_callback=lambda m: print(f"[TSS] {m}"),
+            )
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.detect_levels_btn.setEnabled(True)
+            self.detect_levels_btn.setText("Detect Levels")
+            self.levels_status_label.setText(f"Error: {e}")
+            return
+
+        if not result["success"]:
+            self.detect_levels_btn.setEnabled(True)
+            self.detect_levels_btn.setText("Detect Levels")
+            self.levels_status_label.setText(
+                f"TotalSpineSeg failed: {result.get('error', 'unknown error')}"
+            )
+            print("[TSS stderr]", result.get("stderr", "")[-500:])
+            return
+
+        duration = result["duration_sec"]
+        print(f"[TSS] Done in {duration:.1f}s, parsing levels...")
+
+        # ---- Parse + axial mapping ----
+        try:
+            mapper = LevelMapper()
+            levels = mapper.parse(out_dir, sag_nifti)
+            levels = mapper.map_to_axial(levels, self.axial_slices)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.detect_levels_btn.setEnabled(True)
+            self.detect_levels_btn.setText("Detect Levels")
+            self.levels_status_label.setText(f"Parsing error: {e}")
+            return
+
+        # ---- Canal CSA per level (auto dural sac) ----
+        try:
+            from .totalspineseg.canal_csa import compute_all_level_csas
+            canal_dir = Path(out_dir) / "step1_canal"
+            # Find the single canal NIfTI without guessing basenames
+            # (Path.stem doesn't handle .nii.gz double-extension correctly)
+            candidates = list(canal_dir.glob("*.nii*"))
+            if len(candidates) == 0:
+                raise FileNotFoundError(f"No canal NIfTI in {canal_dir}")
+            if len(candidates) > 1:
+                # Exact stem match (startswith would wrongly match s201 for s2)
+                in_base = Path(sag_nifti).name
+                if in_base.endswith(".nii.gz"):
+                    in_stem = in_base[:-7]
+                elif in_base.endswith(".nii"):
+                    in_stem = in_base[:-4]
+                else:
+                    in_stem = Path(sag_nifti).stem
+                def _stem2(fname):
+                    if fname.endswith(".nii.gz"):
+                        return fname[:-7]
+                    if fname.endswith(".nii"):
+                        return fname[:-4]
+                    return fname
+                matched = [c for c in candidates if _stem2(c.name) == in_stem]
+                canal_nifti = str(matched[0] if matched else candidates[0])
+            else:
+                canal_nifti = str(candidates[0])
+            print(f"[CSA] Computing canal CSA from {canal_nifti}")
+            levels = compute_all_level_csas(canal_nifti, levels, threshold=0.5)
+            # Log results for debugging
+            for lvl_name, lvl_info in levels.items():
+                csa_d = lvl_info.get("canal_csa", {})
+                if "csa_mm2" in csa_d:
+                    print(f"[CSA] {lvl_name}: {csa_d['csa_mm2']:.1f} mm²")
+                else:
+                    print(f"[CSA] {lvl_name}: ERROR - {csa_d.get('error', '?')}")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"[CSA] WARNING: canal CSA failed: {e}")
+            # CSA hesaplanamasa bile devam - levels dict zaten elimizde
+
+        # ---- Populate UI ----
+        self.detected_levels = levels  # save for later analysis
+        if hasattr(self, "analyze_all_btn"):
+            self.analyze_all_btn.setEnabled(True)
+        covered = sum(1 for v in levels.values() if v.get("axial_slice_idx") is not None)
+        total = len(levels)
+        self.levels_status_label.setText(
+            f"Detected {total} levels - {covered} covered by axial volume "
+            f"({duration:.0f}s)"
+        )
+
+        for name, info in levels.items():
+            ax_idx = info.get("axial_slice_idx")
+            wz = info["world_xyz"][2]
+            # Canal CSA from auto dural sac segmentation (may be missing/erroneous)
+            csa_info = info.get("canal_csa", {})
+            if "csa_mm2" in csa_info:
+                csa_str = f"  CSA: {csa_info['csa_mm2']:.0f} mm²"
+            else:
+                csa_str = ""
+            if ax_idx is None:
+                reason = info.get("out_of_range_reason", "gap")
+                item_text = f"  {name:<10}  z={wz:6.1f} mm   OUT OF RANGE ({reason}){csa_str}"
+                item = QListWidgetItem(item_text)
+                item.setForeground(QColor(TXT_LT))
+            else:
+                item_text = (
+                    f"  {name:<10}  z={wz:6.1f} mm   -> axial slice "
+                    f"{ax_idx+1}/{len(self.axial_slices)}{csa_str}"
+                )
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.ItemDataRole.UserRole, ax_idx)  # for click-to-jump later
+            self.levels_list.addItem(item)
+
+        self.detect_levels_btn.setEnabled(True)
+        self.detect_levels_btn.setText("Detect Levels")
+        print(f"[TSS] Done. {covered}/{total} levels covered.")
+
+        # Save canal NIfTI path for axial overlay - match by input basename
+        try:
+            canal_dir2 = Path(out_dir) / "step1_canal"
+            cnd = list(canal_dir2.glob("*.nii*"))
+            in_base = Path(sag_nifti).name
+            if in_base.endswith(".nii.gz"):
+                in_stem = in_base[:-7]
+            elif in_base.endswith(".nii"):
+                in_stem = in_base[:-4]
+            else:
+                in_stem = Path(sag_nifti).stem
+            # Exact stem match - NOT startswith, because "sagittal_s201"
+            # startswith "sagittal_s2" is True and would pick the wrong file.
+            def _stem(fname):
+                if fname.endswith(".nii.gz"):
+                    return fname[:-7]
+                if fname.endswith(".nii"):
+                    return fname[:-4]
+                return fname
+            matched = [c for c in cnd if _stem(c.name) == in_stem]
+            if matched:
+                self.canal_nifti_path = str(matched[0])
+            elif cnd:
+                self.canal_nifti_path = str(cnd[0])
+            else:
+                self.canal_nifti_path = None
+
+        except Exception:
+            self.canal_nifti_path = None
+
+        # ---- Overlay level lines on the sagittal display ----
+        self._update_sagittal_level_overlay()
+
+        # Refresh axial display so canal overlay appears on the current slice
+        self._on_slider(self.current_slice_idx)
+
+    def _update_sagittal_level_overlay(self):
+        """Push detected_levels onto the sagittal display as horizontal lines."""
+        if not getattr(self, "detected_levels", None):
+            return
+        if self.sagittal_data is None or self.sagittal_affine is None:
+            return
+
+        sag_aff = self.sagittal_affine
+        si_axis = int(np.abs(sag_aff[2, :3]).argmax())
+        si_step = sag_aff[2, si_axis]
+        si_origin = sag_aff[2, 3]
+        n_along = self.sagittal_data.shape[si_axis]
+
+        # Stable per-level colors (RGB tuples). L3_body in distinct brown.
+        LEVEL_COLORS = {
+            "L1-L2":   (31, 119, 180),
+            "L2-L3":   (44, 160,  44),
+            "L3-L4":   (255, 127,  14),
+            "L4-L5":   (214,  39,  40),
+            "L5-S":    (148, 103, 189),
+            "L3_body": (140,  86,  75),
+        }
+
+        level_lines = []
+        for name, info in self.detected_levels.items():
+            try:
+                z_world = float(info["world_xyz"][2])
+                pixel_idx = (z_world - si_origin) / si_step
+                raw_fraction = pixel_idx / (n_along - 1)
+                # Same inversion as _compute_sagittal_line_y for consistency.
+                y_frac = 1.0 - raw_fraction
+                y_frac = float(np.clip(y_frac, 0.0, 1.0))
+            except Exception:
+                continue
+            covered = info.get("axial_slice_idx") is not None
+            level_lines.append({
+                "y_frac": y_frac,
+                "color_rgb": LEVEL_COLORS.get(name, (255, 255, 0)),
+                "label": name,
+                "dashed": not covered,
+            })
+
+        # Re-render sagittal slice with overlays preserved.
+        # Reuse current image; only update level_lines.
+        if hasattr(self.sagittal_display, "_img") and self.sagittal_display._img is not None:
+            self.sagittal_display._level_lines = level_lines
+            self.sagittal_display._refresh()
+
+    def _on_analyze_all_levels(self):
+        """Run muscle + dural sac + stenosis analysis at every detected level."""
+        if self.analyzer is None:
+            return
+        detected = getattr(self, "detected_levels", None)
+        canal_path = getattr(self, "canal_nifti_path", None)
+        if not detected:
+            QMessageBox.warning(self, "Analyze All Levels",
+                "Run Detect Levels first.")
+            return
+        if not canal_path:
+            QMessageBox.warning(self, "Analyze All Levels",
+                "No canal segmentation found. Run Detect Levels first.")
+            return
+        if not self.axial_slices:
+            QMessageBox.warning(self, "Analyze All Levels",
+                "Multi-level analysis requires a DICOM axial series.")
+            return
+
+        from .totalspineseg.multi_level_analyzer import MultiLevelAnalyzer
+
+        demo = self._get_demographics()
+        self.analyze_all_btn.setEnabled(False)
+        self.analyze_all_btn.setText("Analyzing all levels...")
+        self.status_label.setText("Analyzing all levels...")
+        QApplication.processEvents()
+
+        def _progress(msg):
+            self.status_label.setText(msg)
+            QApplication.processEvents()
+
+        try:
+            mla = MultiLevelAnalyzer(self.analyzer, self.axial_slices, canal_path)
+            result = mla.analyze_all(
+                detected,
+                slice_nifti_producer=self._make_slice_nifti,
+                demographics=demo,
+                progress_callback=_progress,
+            )
+            self.multi_level_result = result
+            self._show_multi_level_results(result)
+            self.save_pdf_btn.setEnabled(True)
+            self.export_excel_btn.setEnabled(True)
+            self.status_label.setText("Multi-level analysis complete.")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            QMessageBox.critical(self, "Analyze All Levels",
+                f"Multi-level analysis failed:\n{e}")
+            self.status_label.setText("Multi-level analysis failed.")
+        finally:
+            self.analyze_all_btn.setEnabled(True)
+            self.analyze_all_btn.setText("Analyze All Levels")
+
+    def _show_multi_level_results(self, result):
+        """Display multi-level results in the levels_list (temporary view)."""
+        self.levels_list.clear()
+        from PyQt6.QtWidgets import QListWidgetItem
+
+        levels = result.get("levels", {})
+        for lvl_name, data in levels.items():
+            approx = " [approx]" if data.get("approx") else ""
+            csa = data.get("canal_csa_mm2")
+            sten = data.get("stenosis")
+            n_musc = len(data.get("muscles", []))
+
+            csa_str = f"{csa:.0f} mm2" if csa is not None else "N/A"
+            line = f"{lvl_name}{approx}: dural sac {csa_str}, {n_musc} muscles"
+            if sten and sten.get("flag"):
+                line += f"  -> {sten['label']}"
+
+            item = QListWidgetItem(line)
+            # Color: red if stenosis flag, otherwise normal
+            if sten and sten.get("flag"):
+                item.setForeground(QColor(DANGER))
+            self.levels_list.addItem(item)
+
+        # Sarcopenia summary line
+        sarc = result.get("sarcopenia")
+        if sarc and sarc.get("result"):
+            r = sarc["result"]
+            pmi = r.get("pmi_cm2_per_m2")
+            risk = r.get("risk_category", "Unknown")
+            pmi_str = f"PMI {pmi}" if pmi else "PMI N/A"
+            sline = f"L3 sarcopenia: {pmi_str}, risk {risk}"
+            item = QListWidgetItem(sline)
+            item.setForeground(QColor(NAVY))
+            self.levels_list.addItem(item)
+
+    def _make_slice_nifti(self, ax_idx):
+        """Produce a single-slice NIfTI for the given axial slice index using
+        the proven per-slice dcm2niix flow. Returns path str or None.
+        Shared by single-slice Analyze and multi-level analysis."""
+        if not self.axial_slices:
+            return None
+        if ax_idx < 0 or ax_idx >= len(self.axial_slices):
+            return None
+        slc = self.axial_slices[ax_idx]
+        src_dicom = slc.get('source_path')
+        if src_dicom is None or not Path(src_dicom).exists():
+            return None
+        import shutil as _shutil
+        import subprocess as _sp
+        from .dicom_loader import _resolve_dcm2niix
+        tmp_dir = Path(tempfile.gettempdir()) / f"spinosarc_slice_{ax_idx}"
+        if tmp_dir.exists():
+            _shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True)
+        tmp_src_dir = tmp_dir / "src"
+        tmp_src_dir.mkdir()
+        _shutil.copy2(src_dicom, str(tmp_src_dir))
+        dcm2niix_bin = _resolve_dcm2niix()
+        _sp.run([dcm2niix_bin, '-o', str(tmp_dir), '-f', 'slice', str(tmp_src_dir)],
+                capture_output=True, text=True, timeout=30)
+        niftis = list(tmp_dir.glob('slice*.nii*'))
+        return str(niftis[0]) if niftis else None
+
     def _on_analyze(self):
-        print('>>> _on_analyze CALLED')
-        import sys; sys.stdout.flush()
         if self.analyzer is None:
             return
 
@@ -1264,6 +1829,24 @@ class SpinoSarcWindow(QMainWindow):
         if seg.ndim == 3:
             seg = seg[:, :, 0]
 
+        # Compute auto canal CSA for the current slice (if Detect Levels was run).
+        # This is the automatic dural sac segmentation - fast because it only
+        # resamples the precomputed canal NIfTI (no TotalSpineSeg re-run).
+        canal_mask_for_overlay = None
+        if self.axial_slices:
+            canal_mask_for_overlay = self._compute_canal_overlay_for_axial_slice(
+                self.current_slice_idx
+            )
+            if canal_mask_for_overlay is not None:
+                voxel_count = int(canal_mask_for_overlay.sum())
+                slc = self.axial_slices[self.current_slice_idx]
+                ps = slc.get('pixel_spacing', (1.0, 1.0))
+                pixel_area = float(ps[0]) * float(ps[1])
+                canal_csa = voxel_count * pixel_area
+                self.csa_label.setText(
+                    "Dural sac CSA: " + str(int(round(canal_csa))) + " mm2 (auto)"
+                )
+
         # DICOM mode: overlay segmentation on original DICOM pixel array,
         # so pre- and post-analysis views match exactly.
         # Mask comes from dcm2niix LAS NIfTI -> rotate by k=1 to align with DICOM voxel.
@@ -1271,7 +1854,8 @@ class SpinoSarcWindow(QMainWindow):
             dicom_img = self.axial_slices[self.current_slice_idx]['pixel_array']
             seg_aligned = np.rot90(seg, k=1)
             self.axial_display.set_image(dicom_img, overlay_mask=seg_aligned,
-                                         rotation=self.axial_rotation)
+                                         rotation=self.axial_rotation,
+                                         canal_overlay=canal_mask_for_overlay)
         else:
             # NIfTI mode (legacy)
             img = result['image_array']
@@ -1302,7 +1886,41 @@ class SpinoSarcWindow(QMainWindow):
         self.status_label.setText("Analysis failed: " + str(err))
         QMessageBox.critical(self, "Analysis Error", str(err))
 
+    def _gui_demographics_dict(self):
+        """Collect demographics from the GUI inputs as a plain dict for reports."""
+        age = self.age_input.value() or None
+        sex = self.sex_input.currentText()
+        sex = sex if sex in ("M", "F") else None
+        h = self.height_input.value() or None
+        w = self.weight_input.value() or None
+        return {"age": age, "sex": sex, "height_cm": h, "weight_kg": w}
+
     def _on_save_pdf(self):
+        # Multi-level report takes priority if a multi-level analysis exists.
+        mlr = getattr(self, "multi_level_result", None)
+        if mlr:
+            pid = self.patient_id_input.text().strip() or "Patient"
+            default_name = "SpinoSarc_MultiLevel_" + pid.replace(" ", "_") + ".pdf"
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Multi-Level PDF Report", default_name,
+                "PDF files (*.pdf)")
+            if not out_path:
+                return
+            try:
+                from .multi_level_report import export_multi_level_pdf
+                self.status_label.setText("Generating multi-level PDF...")
+                QApplication.processEvents()
+                export_multi_level_pdf(
+                    mlr, self._gui_demographics_dict(), pid, out_path)
+                self.status_label.setText("PDF saved: " + out_path)
+                QMessageBox.information(self, "Saved",
+                    "Multi-level PDF saved to:\n" + out_path)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.status_label.setText("PDF save failed: " + str(e))
+                QMessageBox.critical(self, "Save error", str(e))
+            return
+
         if not self.last_result:
             QMessageBox.warning(self, "No analysis", "Run analysis first.")
             return
@@ -1330,14 +1948,40 @@ class SpinoSarcWindow(QMainWindow):
 
     def _on_export_excel(self):
         """Metrikleri xlsx olarak dışa aktar."""
-        if not self.last_result:
-            QMessageBox.warning(self, "No analysis", "Run analysis first.")
-            return
         try:
             import openpyxl
         except ImportError:
             QMessageBox.critical(self, "Missing dependency",
                 "openpyxl is not installed. Install with: pip install openpyxl")
+            return
+
+        # Multi-level report takes priority if a multi-level analysis exists.
+        mlr = getattr(self, "multi_level_result", None)
+        if mlr:
+            pid = self.patient_id_input.text().strip() or "Patient"
+            default_name = "SpinoSarc_MultiLevel_" + pid.replace(" ", "_") + ".xlsx"
+            out_path, _ = QFileDialog.getSaveFileName(
+                self, "Export Multi-Level Metrics", default_name,
+                "Excel files (*.xlsx)")
+            if not out_path:
+                return
+            try:
+                from .multi_level_report import export_multi_level_excel
+                self.status_label.setText("Generating multi-level Excel...")
+                QApplication.processEvents()
+                export_multi_level_excel(
+                    mlr, self._gui_demographics_dict(), pid, out_path)
+                self.status_label.setText("Excel saved: " + out_path)
+                QMessageBox.information(self, "Saved",
+                    "Multi-level Excel saved to:\n" + out_path)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.status_label.setText("Excel save failed: " + str(e))
+                QMessageBox.critical(self, "Export error", str(e))
+            return
+
+        if not self.last_result:
+            QMessageBox.warning(self, "No analysis", "Run analysis first.")
             return
 
         pid = self.patient_id_input.text().strip() or "Patient"
@@ -1503,8 +2147,6 @@ class SpinoSarcWindow(QMainWindow):
         self.analyze_btn.setEnabled(False)
         self.save_pdf_btn.setEnabled(False)
         self.export_excel_btn.setEnabled(False)
-        self.roi_draw_btn.setEnabled(False)
-        self.roi_clear_btn.setEnabled(False)
         self.new_case_btn.setEnabled(False)
         self.status_label.setText("Ready - drop NIfTI file(s) or DICOM folder to begin")
 

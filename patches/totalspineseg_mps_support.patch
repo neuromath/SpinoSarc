@@ -1,0 +1,9 @@
+94c94
+<         '--device', type=str, choices=['cuda', 'cpu'], default='cuda' if torch.cuda.is_available() else 'cpu',
+---
+>         '--device', type=str, choices=['cuda', 'cpu', 'mps'], default=('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')),
+146a147,150
+>     elif device == 'mps':
+>         # Apple Silicon GPU acceleration via Metal Performance Shaders
+>         os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+>         device = torch.device('mps')
