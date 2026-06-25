@@ -166,12 +166,12 @@ class SpinoSarcAnalyzer:
         notes = []
 
         if tpa == 0.0:
-            notes.append("Psoas segmentasyonu bulunamadi - PMI hesaplanamadi.")
+            notes.append("Psoas segmentation not found - PMI could not be computed.")
             return SarcopeniaResult(None, 0.0, 0.0, None, notes=notes)
 
         if not psoas_r or not psoas_l:
             side = 'R' if psoas_r else 'L'
-            notes.append(f"Tek tarafli psoas ({side}); PMI sadece bu tarafa dayanir.")
+            notes.append(f"Unilateral psoas ({side}); PMI is based on this side only.")
 
         height_m = demo.height_m if demo else None
         pmi = None
@@ -198,10 +198,10 @@ class SpinoSarcAnalyzer:
             else:
                 risk = 'Low'
         else:
-            notes.append("Demografi eksik - PMI hesaplanamadi.")
+            notes.append("Demographics missing - PMI could not be computed.")
 
-        notes.append("Klinik sarkopeni tanisi degildir. EWGSOP2: kas kuvveti + fonksiyon testi gerekli.")
-        notes.append("PMI esikleri CT-bazli (Hamaguchi/Englesbe/Durand); MR'da ~5-10% sapma olasi.")
+        notes.append("Not a clinical sarcopenia diagnosis. EWGSOP2 requires muscle strength + physical performance testing.")
+        notes.append("PMI thresholds are CT-derived (Hamaguchi/Englesbe/Durand); MRI may differ by ~5-10%.")
 
         return SarcopeniaResult(
             pmi_cm2_per_m2=round(pmi, 2) if pmi else None,

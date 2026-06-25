@@ -16,7 +16,7 @@
 
 ![SpinoSarc GUI](docs/screenshots/gui.png)
 
-*Main application window: axial and sagittal viewers, patient demographics, dural sac ROI tool, and per-muscle analysis results.*
+*Main application window: axial and sagittal viewers, patient demographics, automatic lumbar level detection, and per-muscle analysis results.*
 
 ## Overview
 
@@ -26,12 +26,14 @@ SpinoSarc is a native macOS application for automated quantitative analysis of p
 
 - 🗂️ **DICOM ingestion** with multi-vendor support (Siemens, Philips, GE) including JPEG Lossless decompression
 - 🧠 **Paraspinal muscle segmentation** via the [MuscleMap](https://github.com/MuscleMap) U-Net backbone — 8 muscle classes (multifidus, erector spinae, psoas, quadratus lumborum; left and right)
+- 🦴 **Automatic lumbar level detection** via [TotalSpineSeg](https://github.com/neuropoly/totalspineseg) — labels intervertebral discs (L1-L2 … L5-S) and maps them onto the axial series
+- 🩺 **Automatic dural sac segmentation** — cross-sectional area computed directly from the TotalSpineSeg canal mask (no manual ROI required)
+- 🔬 **Multi-level analysis** — paraspinal muscle metrics + dural sac CSA at every detected level in a single run; levels falling in axial gaps use the nearest slice (flagged with distance)
+- 📏 **Canal narrowing flags** — neutral measurement against published dural-sac thresholds (absolute <75, relative <100, early <130 mm²); a research aid for the radiologist, **not a diagnosis**
 - 📐 **Quantitative metrics**: cross-sectional area (CSA), fat fraction, total psoas area (TPA), psoas muscle index (PMI)
-- 🩺 **Manual dural sac CSA** measurement via interactive polygon ROI
 - 📊 **Reference values** from published literature (Hamaguchi 2016, Englesbe 2010, Barz 2010) — for context, not classification
-- 📄 **Single-page PDF report** and **Excel export** for downstream analysis
+- 📄 **PDF and Excel reports** — single-slice and multi-level, for downstream analysis
 - 🔒 **Fully offline** — no data leaves the device
-- 🌐 **Bilingual UI**: English and Turkish
 
 ## Installation
 
@@ -70,11 +72,11 @@ python -m spinosarc_app.gui
 
 1. **Launch SpinoSarc**
 2. **Drag a lumbar MR DICOM folder** (or NIfTI files) onto the drop zone
-3. **Navigate axial and sagittal sliders** to select the slice of interest
-4. **(Optional)** Draw a polygon ROI on the dural sac for stenosis assessment
-5. **Enter patient demographics** (optional, used for PMI calculation)
-6. **Click "Analyze"** — segmentation runs in ~10-30 seconds on Apple Silicon
-7. **Export** results as PDF (single-page report) or Excel (detailed metrics)
+3. **Enter patient demographics** (optional, used for PMI calculation)
+4. **Click "Detect Levels"** — TotalSpineSeg labels the lumbar discs and segments the spinal canal (~60 seconds on Apple Silicon, first run)
+5. **Click a level** in the list to jump to its axial slice
+6. **Click "Analyze"** for the current slice, or **"Analyze All Levels"** to run every detected level (muscle + dural sac + canal flags) in one pass
+7. **Export** results as PDF or Excel — the report is multi-level when a multi-level analysis has been run
 8. **Click "New Case"** to clear and start over
 
 ## What SpinoSarc Reports
@@ -87,9 +89,12 @@ For each analyzed slice:
 | Per-muscle fat fraction (%) | Intensity-based fat estimate |
 | Total Psoas Area (cm²) | Sum of left + right psoas CSA |
 | Psoas Muscle Index (cm²/m²) | TPA normalized by patient height (if provided) |
-| Dural Sac CSA (mm²) | From manual polygon ROI (if drawn) |
+| Dural Sac CSA (mm²) | Automatic, from the TotalSpineSeg canal mask |
+| Canal narrowing flag | Neutral comparison against literature thresholds (not a diagnosis) |
 
-Reference cut-off values from the literature are displayed for context but **no automated risk classification** is performed.
+When **Analyze All Levels** is used, these metrics are reported for every detected level (L1-L2 … L5-S) plus L3-based sarcopenia, with flags for levels measured from a nearby slice (axial gaps) and a caveat at L5-S where the thresholds are less reliable.
+
+Reference cut-off values from the literature are displayed for context but **no automated diagnosis** is performed.
 
 ## How It Differs From MuscleMap
 
@@ -97,11 +102,12 @@ SpinoSarc uses [MuscleMap](https://github.com/MuscleMap) as its segmentation eng
 
 - DICOM ingestion (MuscleMap requires NIfTI)
 - Anatomical coordinate alignment between axial and sagittal series
+- Automatic lumbar level detection and dural sac segmentation (TotalSpineSeg)
+- Multi-level analysis across all lumbar levels in a single run
 - Quantitative metric extraction with literature reference values
-- Manual ROI for dural sac
-- Single-page PDF / Excel reporting
+- Neutral canal-narrowing flags (research aid, not diagnosis)
+- PDF / Excel reporting (single-slice and multi-level)
 - Native macOS desktop application — no programming required
-- Bilingual interface
 
 ## Citation
 

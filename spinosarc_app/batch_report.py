@@ -17,7 +17,7 @@ def main(csv_path, slices_dir, output_dir, mm_script):
         sub_id = row['sub_id']
         slice_path = Path(slices_dir) / f'{sub_id}_L4L5.nii.gz'
         if not slice_path.exists():
-            print(f"  SKIP {sub_id}: slice bulunamadi")
+            print(f"  SKIP {sub_id}: slice not found")
             continue
 
         demo = Demographics(
