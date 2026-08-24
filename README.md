@@ -4,7 +4,7 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20760332.svg)](https://doi.org/10.5281/zenodo.20760332)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011%2B-blue)](https://www.apple.com/macos/)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2014%2B-blue)](https://www.apple.com/macos/)
 [![Research Use Only](https://img.shields.io/badge/Use-Research%20Only-red)](DISCLAIMER.md)
 
 
@@ -47,7 +47,7 @@ The release is self-contained: Python, PyTorch, MuscleMap, TotalSpineSeg, both s
 
 **System requirements:**
 
-- macOS 11.0 (Big Sur) or later
+- macOS 14.0 (Sonoma) or later
 - Apple Silicon Mac (M1 / M2 / M3 / M4 or newer)
 - At least 8 GB free disk space during installation and analysis
 - No Python, Conda, Homebrew, Terminal, or internet connection required after downloading the DMG
