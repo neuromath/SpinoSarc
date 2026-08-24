@@ -1,80 +1,78 @@
 #!/bin/bash
-# build_app.sh - SpinoSarc.app builder for Apple Silicon
-set -e
+set -euo pipefail
 
-echo "=== SpinoSarc Build ==="
-echo ""
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$ROOT_DIR/.build"
+VENV_DIR="$BUILD_DIR/venv"
+MUSCLEMAP_DIR="$BUILD_DIR/vendor/MuscleMap"
+TSS_DATA_DIR="$BUILD_DIR/totalspineseg_data"
+MUSCLEMAP_COMMIT="d11df779a4e146e7e913b89cb202fc06a6e2ef6a"
+APP_VERSION="${SPINOSARC_VERSION:-0.3.0}"
+PYTHON_BIN="${SPINOSARC_PYTHON:-python3}"
 
-if [[ -z "$CONDA_PREFIX" ]]; then
-    echo "ERROR: Activate spinosarc env first: conda activate spinosarc"
+if [[ "$(uname -m)" != "arm64" ]]; then
+    echo "ERROR: Apple Silicon (arm64) is required for this release build."
     exit 1
 fi
 
-if [[ "$(basename $CONDA_PREFIX)" != "spinosarc" ]]; then
-    echo "WARNING: Active env is '$(basename $CONDA_PREFIX)', not 'spinosarc'."
-    read -p "Continue anyway? (y/N) " confirm
-    [[ "$confirm" != "y" ]] && exit 1
-fi
-
-if ! command -v pyinstaller &> /dev/null; then
-    echo "Installing PyInstaller..."
-    pip install pyinstaller
-fi
-
-if ! command -v dcm2niix &> /dev/null; then
-    echo "ERROR: dcm2niix not found. Install:"
-    echo "  conda install -c conda-forge dcm2niix"
+command -v "$PYTHON_BIN" >/dev/null || {
+    echo "ERROR: Python 3.11 is required. Set SPINOSARC_PYTHON if needed."
     exit 1
-fi
-
-# JPEG decompression kontrol - DOGRU import isimleriyle
-python3 -c "
-import pylibjpeg
-import libjpeg
-import openjpeg
-print(f'pylibjpeg {pylibjpeg.__version__}, libjpeg, openjpeg: OK')
-" || {
-    echo "ERROR: JPEG decompression eksik. Kur:"
-    echo "  pip install pylibjpeg pylibjpeg-libjpeg pylibjpeg-openjpeg"
+}
+command -v git >/dev/null || { echo "ERROR: git is required."; exit 1; }
+command -v dcm2niix >/dev/null || {
+    echo "ERROR: dcm2niix is required (brew install dcm2niix)."
     exit 1
 }
 
-# DICOM decompression gercek testi
-python3 -c "
-import pydicom
-ds = pydicom.dcmread('/Users/berkayyilmaz/Desktop/SynapseMediaSets/Syn20260523233419/DICOMOBJ/00000033', force=True)
-arr = ds.pixel_array
-print(f'DICOM decompress test: OK ({arr.shape})')
-" 2>&1 || echo "WARN: Test DICOM decompress basarisiz (test verisi yoksa normal)"
+mkdir -p "$BUILD_DIR/vendor"
+if [[ ! -d "$VENV_DIR" ]]; then
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install --no-cache-dir -r "$ROOT_DIR/requirements-macos-build.txt"
 
-echo ""
-echo "Cleaning previous build..."
-rm -rf build/ dist/
+if [[ ! -d "$MUSCLEMAP_DIR/.git" ]]; then
+    git clone https://github.com/MuscleMap/MuscleMap.git "$MUSCLEMAP_DIR"
+fi
+git -C "$MUSCLEMAP_DIR" fetch --depth 1 origin "$MUSCLEMAP_COMMIT"
+git -C "$MUSCLEMAP_DIR" checkout --detach "$MUSCLEMAP_COMMIT"
 
-echo ""
-echo "Running PyInstaller (5-15 minutes)..."
-echo "Log: /tmp/spinosarc_build.log"
-echo ""
-pyinstaller --clean --noconfirm spinosarc.spec 2>&1 | tee /tmp/spinosarc_build.log
+PYTHONPATH="$MUSCLEMAP_DIR/scripts" python -c \
+    "from mm_util import ensure_model_downloaded; ensure_model_downloaded('abdomen', 'latest')"
 
-echo ""
-if [[ -d "dist/SpinoSarc.app" ]]; then
-    APP_SIZE=$(du -sh dist/SpinoSarc.app | cut -f1)
-    echo "================================"
-    echo "  BUILD SUCCESS"
-    echo "================================"
-    echo "  App:  dist/SpinoSarc.app"
-    echo "  Size: $APP_SIZE"
-    echo ""
-    echo "Test (terminal output icin):"
-    echo "  ./dist/SpinoSarc.app/Contents/MacOS/SpinoSarc"
-    echo ""
-    echo "Veya normal:"
-    echo "  open dist/SpinoSarc.app"
-else
-    echo "================================"
-    echo "  BUILD FAILED"
-    echo "================================"
-    echo "Log: tail -100 /tmp/spinosarc_build.log"
+TSS_INFERENCE="$(python -c 'import totalspineseg.inference as m; print(m.__file__)')"
+if ! grep -q "'mps'" "$TSS_INFERENCE"; then
+    patch "$TSS_INFERENCE" < "$ROOT_DIR/patches/totalspineseg_mps_support.patch"
+fi
+
+mkdir -p "$TSS_DATA_DIR"
+python -m totalspineseg.init_inference --data-dir "$TSS_DATA_DIR" --quiet
+
+export SPINOSARC_VERSION="$APP_VERSION"
+export SPINOSARC_MUSCLEMAP_BUILD="$MUSCLEMAP_DIR/scripts"
+export SPINOSARC_TSS_DATA_BUILD="$TSS_DATA_DIR"
+export SPINOSARC_DCM2NIIX_BUILD="$(command -v dcm2niix)"
+
+rm -rf "$ROOT_DIR/build" "$ROOT_DIR/dist"
+python -m PyInstaller --clean --noconfirm "$ROOT_DIR/spinosarc.spec"
+
+APP="$ROOT_DIR/dist/SpinoSarc.app"
+if [[ ! -d "$APP" ]]; then
+    echo "ERROR: PyInstaller did not create $APP"
     exit 1
 fi
+
+if [[ -n "${SPINOSARC_CODESIGN_IDENTITY:-}" ]]; then
+    codesign --force --deep --options runtime --timestamp \
+        --sign "$SPINOSARC_CODESIGN_IDENTITY" "$APP"
+else
+    codesign --force --deep --sign - "$APP"
+fi
+
+codesign --verify --deep --strict --verbose=2 "$APP"
+"$APP/Contents/MacOS/SpinoSarc" --spinosarc-tss-worker --help >/dev/null
+
+echo "Built $APP"
+du -sh "$APP"

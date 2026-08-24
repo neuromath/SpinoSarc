@@ -357,6 +357,43 @@ class DicomLoaderThread(QThread):
             self.error.emit(str(e))
 
 
+class LevelDetectionThread(QThread):
+    """Run the bundled TotalSpineSeg worker without blocking the GUI."""
+    completed = pyqtSignal(dict, str, str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, sagittal_nifti, output_dir):
+        super().__init__()
+        self.sagittal_nifti = str(sagittal_nifti)
+        self.output_dir = str(output_dir)
+
+    def run(self):
+        try:
+            from .totalspineseg.runner import TotalSpineSegRunner
+
+            runner = TotalSpineSegRunner()
+            result = runner.run(
+                sagittal_nifti_path=self.sagittal_nifti,
+                output_dir=self.output_dir,
+                device="mps",
+                step1_only=True,
+                iso=True,
+                progress_callback=self.progress.emit,
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            result = {
+                "success": False,
+                "error": str(exc),
+                "stdout": "",
+                "stderr": "",
+                "duration_sec": 0.0,
+                "command": [],
+            }
+        self.completed.emit(result, self.output_dir, self.sagittal_nifti)
+
+
 class PickSeriesDialog(QDialog):
     """Birden fazla axial/sagittal aday varsa kullanıcıya seçim sun."""
     def __init__(self, axial_candidates, sagittal_candidates, parent=None):
@@ -1378,17 +1415,7 @@ class SpinoSarcWindow(QMainWindow):
         self.slice_slider.setValue(ax_idx)
 
     def _on_detect_levels(self):
-        """Run TotalSpineSeg on the current sagittal NIfTI, parse levels,
-        map to axial slices, and populate the levels list.
-
-        WARNING: This runs synchronously - the GUI will freeze for ~60 seconds
-        while TotalSpineSeg performs inference. A future version will move
-        this to a QThread worker.
-        """
-        from PyQt6.QtWidgets import QMessageBox, QListWidgetItem
-        from PyQt6.QtGui import QColor
-
-        # ---- Sanity checks ----
+        """Start bundled lumbar-level detection in a background thread."""
         if not self.axial_slices:
             QMessageBox.warning(
                 self, "Detect Levels",
@@ -1396,10 +1423,7 @@ class SpinoSarcWindow(QMainWindow):
             )
             return
 
-        # We need a sagittal NIfTI on disk. SpinoSarc already produces one
-        # at load time via dcm2niix; that path is stored in self.sagittal_path
-        # (NIfTI mode) or self.sagittal_nifti_for_tss (set by the DICOM loader).
-        sag_nifti = getattr(self, 'sagittal_nifti_path', None)
+        sag_nifti = getattr(self, "sagittal_nifti_path", None)
         if not sag_nifti or not Path(sag_nifti).is_file():
             QMessageBox.critical(
                 self, "Detect Levels",
@@ -1408,53 +1432,37 @@ class SpinoSarcWindow(QMainWindow):
             )
             return
 
-        # ---- Lazy import (avoid GUI import overhead on startup) ----
-        from .totalspineseg.runner import TotalSpineSegRunner
-        from .totalspineseg.level_mapper import LevelMapper
-
-        runner = TotalSpineSegRunner()
-        if not runner.is_available():
-            QMessageBox.critical(
-                self, "Detect Levels",
-                "TotalSpineSeg is not available.\n\n"
-                "Make sure the `totalspineseg` conda environment is installed.",
-            )
-            return
-
-        # ---- Run (blocking) ----
         self.detect_levels_btn.setEnabled(False)
-        self.detect_levels_btn.setText("Detecting...")
+        self.detect_levels_btn.setText("Detecting…")
         self.levels_status_label.setText(
-            "Running TotalSpineSeg (this takes ~60 seconds on Apple Silicon)..."
+            "Preparing the built-in level detector…"
         )
         self.levels_list.clear()
-        QApplication.processEvents()
 
         out_dir = str(Path(tempfile.gettempdir()) / "spinosarc_tss_output")
-        # Clean stale output from prior runs (avoids picking the wrong canal
-        # NIfTI when a different sagittal series was processed earlier).
         try:
             import shutil
             if Path(out_dir).exists():
                 shutil.rmtree(out_dir)
-        except Exception as _e:
-            print(f"[TSS] Could not clean out_dir: {_e}")
-        try:
-            print(f"[TSS] Running on {sag_nifti}")
-            result = runner.run(
-                sagittal_nifti_path=sag_nifti,
-                output_dir=out_dir,
-                device="mps",
-                step1_only=True,
-                iso=True,
-                progress_callback=lambda m: print(f"[TSS] {m}"),
-            )
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            self.detect_levels_btn.setEnabled(True)
-            self.detect_levels_btn.setText("Detect Levels")
-            self.levels_status_label.setText(f"Error: {e}")
-            return
+        except Exception as exc:
+            print(f"[TSS] Could not clean output folder: {exc}")
+
+        self.level_detection_thread = LevelDetectionThread(sag_nifti, out_dir)
+        self.level_detection_thread.progress.connect(
+            self.levels_status_label.setText
+        )
+        self.level_detection_thread.completed.connect(
+            self._on_level_detection_finished
+        )
+        self.level_detection_thread.finished.connect(
+            self.level_detection_thread.deleteLater
+        )
+        self.level_detection_thread.start()
+
+    def _on_level_detection_finished(self, result, out_dir, sag_nifti):
+        """Parse TotalSpineSeg output and update the viewers on the UI thread."""
+        self.detect_levels_btn.setEnabled(True)
+        self.detect_levels_btn.setText("Detect Levels")
 
         if not result["success"]:
             self.detect_levels_btn.setEnabled(True)

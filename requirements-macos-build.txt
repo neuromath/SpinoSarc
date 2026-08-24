@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Standalone lumbar-level worker. Keep these pinned: PyInstaller must collect
+# exactly the package set used during the release build.
+totalspineseg[nnunetv2]==20260807
+nnunetv2==2.6.2

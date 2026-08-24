@@ -5,6 +5,23 @@ All notable changes to SpinoSarc are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- A genuinely self-contained Apple Silicon application: Python, dcm2niix, MuscleMap, TotalSpineSeg, and both model-weight sets are embedded in the app bundle.
+- An isolated TotalSpineSeg worker mode that uses the SpinoSarc executable itself; end users no longer need Conda or a second environment.
+- Reproducible arm64 GitHub Actions builds with optional Developer ID signing, Apple notarization, stapling, SHA-256 checksum generation, and automatic release upload.
+- Unit and frozen-worker smoke tests for the standalone runtime.
+
+### Changed
+- Lumbar level detection now runs in a background thread so the interface remains responsive.
+- Worker counts are memory-aware for 8–16 GB Macs; MPS-specific failures retry safely on CPU.
+- Bundle identifiers and all application/DMG version fields now use the release version consistently.
+
+### Fixed
+- Removed the invalid Torch/Torchvision version pairing from the dependency lock.
+- Removed hard-coded developer home-directory and test-DICOM paths from release builds.
+
 ## [0.2.0] - 2026-06-25
 
 ### Added

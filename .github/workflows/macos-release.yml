@@ -1,0 +1,110 @@
+name: Build Apple Silicon DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: true
+        default: 0.3.0
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "SPINOSARC_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: arm64
+
+      - name: Install native build tools
+        run: brew install dcm2niix create-dmg
+
+      - name: Import Developer ID certificate
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        shell: bash
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/spinosarc-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/developer-id.p12"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERTIFICATE"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          security import "$CERTIFICATE" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k actions "$KEYCHAIN"
+          echo "SPINOSARC_CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build self-contained application
+        run: ./build_app.sh
+
+      - name: Run unit tests
+        run: .build/venv/bin/python -m unittest discover -s tests -v
+
+      - name: Build DMG
+        run: ./build_dmg.sh
+
+      - name: Notarize and staple
+        if: env.APPLE_CERTIFICATE_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        shell: bash
+        run: |
+          DMG="dist/SpinoSarc-${SPINOSARC_VERSION}-Apple-Silicon.dmg"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG"
+          spctl --assess --type open --context context:primary-signature -v "$DMG"
+          shasum -a 256 "$DMG" > "$DMG.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpinoSarc-${{ env.SPINOSARC_VERSION }}-Apple-Silicon
+          path: |
+            dist/SpinoSarc-${{ env.SPINOSARC_VERSION }}-Apple-Silicon.dmg
+            dist/SpinoSarc-${{ env.SPINOSARC_VERSION }}-Apple-Silicon.dmg.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Attach files to GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          DMG="dist/SpinoSarc-${SPINOSARC_VERSION}-Apple-Silicon.dmg"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --generate-notes \
+              --title "SpinoSarc $SPINOSARC_VERSION"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --clobber

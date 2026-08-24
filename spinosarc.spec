@@ -1,113 +1,103 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
-PyInstaller spec for SpinoSarc.app
-Build with: pyinstaller spinosarc.spec  (run from project root)
-"""
+"""PyInstaller recipe for the self-contained Apple Silicon application."""
+
 import os
-import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all, copy_metadata
+
+
 PROJECT_ROOT = Path(SPECPATH).resolve()
-SPINOSARC_PKG = PROJECT_ROOT / 'spinosarc_app'
-MUSCLEMAP_SCRIPTS = Path.home() / 'SpinoSarc' / 'MuscleMap' / 'scripts'
+APP_VERSION = os.environ.get("SPINOSARC_VERSION", "0.3.0")
+MUSCLEMAP_SCRIPTS = Path(
+    os.environ.get(
+        "SPINOSARC_MUSCLEMAP_BUILD",
+        str(PROJECT_ROOT / ".build" / "vendor" / "MuscleMap" / "scripts"),
+    )
+)
+TSS_DATA = Path(
+    os.environ.get(
+        "SPINOSARC_TSS_DATA_BUILD",
+        str(PROJECT_ROOT / ".build" / "totalspineseg_data"),
+    )
+)
+
 
 def find_dcm2niix():
-    env = os.environ.get('SPINOSARC_DCM2NIIX_BUILD')
-    if env and Path(env).is_file():
-        return env
-    conda_prefix = os.environ.get('CONDA_PREFIX', '')
-    if conda_prefix:
-        candidate = Path(conda_prefix) / 'bin' / 'dcm2niix'
-        if candidate.is_file():
-            return str(candidate)
+    configured = os.environ.get("SPINOSARC_DCM2NIIX_BUILD")
+    if configured and Path(configured).is_file():
+        return configured
     import shutil
-    return shutil.which('dcm2niix')
+
+    return shutil.which("dcm2niix")
+
 
 DCM2NIIX_BIN = find_dcm2niix()
 if not DCM2NIIX_BIN:
-    raise RuntimeError("dcm2niix not found. Activate spinosarc env.")
+    raise RuntimeError("dcm2niix was not found; run build_app.sh")
+if not (MUSCLEMAP_SCRIPTS / "mm_util.py").is_file():
+    raise RuntimeError(f"MuscleMap scripts not found at {MUSCLEMAP_SCRIPTS}")
+if not list((MUSCLEMAP_SCRIPTS / "models").rglob("*.pth")):
+    raise RuntimeError("MuscleMap weights are missing; run build_app.sh")
+if not list(TSS_DATA.rglob("checkpoint_final.pth")):
+    raise RuntimeError("TotalSpineSeg weights are missing; run build_app.sh")
 
-if not MUSCLEMAP_SCRIPTS.is_dir():
-    raise RuntimeError(f"MuscleMap not found at {MUSCLEMAP_SCRIPTS}")
-weights_check = MUSCLEMAP_SCRIPTS / 'models' / 'abdomen' / 'v0.0' / 'contrast_agnostic_abdomen_model.pth'
-if not weights_check.is_file():
-    raise RuntimeError(f"Missing MuscleMap weights at {weights_check}")
-
-print(f"[spec] PROJECT_ROOT      = {PROJECT_ROOT}")
-print(f"[spec] MUSCLEMAP_SCRIPTS = {MUSCLEMAP_SCRIPTS}")
-print(f"[spec] DCM2NIIX_BIN      = {DCM2NIIX_BIN}")
 
 datas = [
-    (str(MUSCLEMAP_SCRIPTS), 'musclemap_scripts'),
+    (str(MUSCLEMAP_SCRIPTS), "musclemap_scripts"),
+    (str(TSS_DATA), "totalspineseg_data"),
 ]
+binaries = [(DCM2NIIX_BIN, "bin")]
+hiddenimports = ["mm_util"]
 
-from PyInstaller.utils.hooks import collect_all
-
-# Module isimlerinin gercek import isimleri:
-# pylibjpeg-libjpeg  -> 'libjpeg'
-# pylibjpeg-openjpeg -> 'openjpeg'
-extra_datas = []
-extra_binaries = []
-extra_hidden = []
-for pkg in ['pylibjpeg', 'libjpeg', 'openjpeg',
-            'monai', 'nibabel', 'pydicom', 'skimage', 'reportlab']:
+# TotalSpineSeg and nnU-Net rely on plugin-style/dynamic imports.  Collecting
+# their package data and submodules at build time makes the release independent
+# of Python, pip, Conda, and the network on the radiologist's Mac.
+packages = [
+    "pylibjpeg", "libjpeg", "openjpeg", "monai", "nibabel", "pydicom",
+    "skimage", "reportlab", "totalspineseg", "nnunetv2", "auglab",
+    "batchgenerators", "dynamic_network_architectures", "acvl_utils",
+    "torchio", "nilearn", "gryds",
+]
+for package in packages:
     try:
-        d, b, h = collect_all(pkg)
-        extra_datas.extend(d)
-        extra_binaries.extend(b)
-        extra_hidden.extend(h)
-        print(f"[spec] collect_all({pkg}): {len(d)} data, {len(b)} bin, {len(h)} hidden")
-    except Exception as e:
-        print(f"[spec] WARN: collect_all({pkg}) failed: {e}")
+        package_data, package_binaries, package_hidden = collect_all(package)
+        datas.extend(package_data)
+        binaries.extend(package_binaries)
+        hiddenimports.extend(package_hidden)
+    except Exception as exc:
+        print(f"[spec] collect_all({package}) warning: {exc}")
 
-datas.extend(extra_datas)
+for distribution in (
+    "totalspineseg", "nnunetv2", "dynamic-network-architectures",
+    "batchgenerators", "torchio", "nilearn", "monai",
+):
+    try:
+        datas.extend(copy_metadata(distribution, recursive=True))
+    except Exception as exc:
+        print(f"[spec] metadata({distribution}) warning: {exc}")
 
-binaries = [(DCM2NIIX_BIN, 'bin')]
-binaries.extend(extra_binaries)
-
-hiddenimports = [
-    'mm_util',
-    'sklearn.cluster', 'sklearn.cluster._kmeans',
-    'sklearn.mixture', 'sklearn.mixture._gaussian_mixture',
-    'sklearn.utils._cython_blas',
-    'sklearn.neighbors', 'sklearn.neighbors.typedefs',
-    'sklearn.tree', 'sklearn.tree._utils',
-    'scipy.ndimage', 'scipy.special',
-    'scipy.special._ufuncs_cxx', 'scipy.special.cython_special',
-    'scipy.sparse.csgraph._validation',
-    'skimage.filters',
-    'monai', 'monai.transforms', 'monai.networks',
-    'monai.networks.nets', 'monai.networks.layers',
-    'monai.networks.layers.factories', 'monai.inferers',
-    'monai.utils', 'monai.utils.module',
-    'monai.data', 'monai.config',
-    'torch', 'torch._C', 'torch._dynamo',
-    'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets',
-    'reportlab', 'reportlab.pdfgen', 'reportlab.lib',
-    'reportlab.platypus', 'reportlab.graphics',
-    'pydicom', 'pydicom.encoders', 'pydicom.encoders.pylibjpeg',
-    'pydicom.encoders.gdcm', 'pydicom.pixels', 'pydicom.pixels.decoders',
-    # pylibjpeg ve plugin'leri - DOGRU import isimleri:
-    'pylibjpeg',
-    'libjpeg',         # pylibjpeg-libjpeg paketinin import ismi
-    'openjpeg',        # pylibjpeg-openjpeg paketinin import ismi
-    'nibabel', 'nibabel.nifti1', 'nibabel.spatialimages',
-]
-hiddenimports.extend(extra_hidden)
-hiddenimports = list(set(hiddenimports))
+hiddenimports.extend([
+    "sklearn.cluster", "sklearn.cluster._kmeans", "sklearn.mixture",
+    "sklearn.mixture._gaussian_mixture", "sklearn.utils._cython_blas",
+    "sklearn.neighbors", "sklearn.tree", "sklearn.tree._utils",
+    "scipy.ndimage", "scipy.special", "scipy.special._ufuncs_cxx",
+    "scipy.special.cython_special", "scipy.sparse.csgraph._validation",
+    "monai.transforms", "monai.networks", "monai.inferers", "monai.data",
+    "torch", "torch._C", "torch._dynamo", "PyQt6.QtCore", "PyQt6.QtGui",
+    "PyQt6.QtWidgets", "pydicom.pixels", "pydicom.pixels.decoders",
+    "nibabel.nifti1", "nibabel.spatialimages",
+])
+hiddenimports = sorted(set(hiddenimports))
 
 excludes = [
-    'matplotlib.tests', 'numpy.tests', 'scipy.tests',
-    'pandas.tests', 'sklearn.tests',
-    'tkinter',
-    'IPython', 'jupyter', 'notebook',
-    'pytest',
-    'PyQt6.QtWebEngine', 'PyQt6.QtMultimedia',
+    "matplotlib.tests", "numpy.tests", "scipy.tests", "pandas.tests",
+    "sklearn.tests", "tkinter", "IPython", "jupyter", "notebook", "pytest",
+    "PyQt6.QtWebEngine", "PyQt6.QtMultimedia",
 ]
 
-
 a = Analysis(
-    [str(PROJECT_ROOT / 'spinosarc_launcher.py')],
+    [str(PROJECT_ROOT / "spinosarc_launcher.py")],
     pathex=[str(PROJECT_ROOT), str(MUSCLEMAP_SCRIPTS)],
     binaries=binaries,
     datas=datas,
@@ -116,45 +106,50 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=None,
     noarchive=False,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=None)
-
+pyz = PYZ(a.pure, a.zipped_data)
 exe = EXE(
-    pyz, a.scripts, [],
+    pyz,
+    a.scripts,
+    [],
     exclude_binaries=True,
-    name='SpinoSarc',
-    debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-    console=False, disable_windowed_traceback=False, argv_emulation=False,
-    target_arch='arm64',
-    codesign_identity=None, entitlements_file=None,
+    name="SpinoSarc",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    argv_emulation=False,
+    target_arch="arm64",
+    codesign_identity=os.environ.get("SPINOSARC_CODESIGN_IDENTITY") or None,
+    entitlements_file=None,
 )
-
 coll = COLLECT(
-    exe, a.binaries, a.zipfiles, a.datas,
-    strip=False, upx=False, upx_exclude=[],
-    name='SpinoSarc',
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="SpinoSarc",
 )
-
 app = BUNDLE(
     coll,
-    name='SpinoSarc.app',
-    icon=None,
-    bundle_identifier='com.spinosarc.app',
-    version='0.1.0',
+    name="SpinoSarc.app",
+    icon=os.environ.get("SPINOSARC_ICON") or None,
+    bundle_identifier="org.neuromath.SpinoSarc",
+    version=APP_VERSION,
     info_plist={
-        'NSPrincipalClass': 'NSApplication',
-        'NSHighResolutionCapable': 'True',
-        'CFBundleName': 'SpinoSarc',
-        'CFBundleDisplayName': 'SpinoSarc',
-        'CFBundleVersion': '0.1.0',
-        'CFBundleShortVersionString': '0.1.0',
-        'NSHumanReadableCopyright': 'Copyright (c) 2026 Berkay Yilmaz',
-        'NSRequiresAquaSystemAppearance': 'False',
-        'LSMinimumSystemVersion': '11.0',
+        "NSPrincipalClass": "NSApplication",
+        "NSHighResolutionCapable": True,
+        "CFBundleName": "SpinoSarc",
+        "CFBundleDisplayName": "SpinoSarc",
+        "CFBundleVersion": APP_VERSION,
+        "CFBundleShortVersionString": APP_VERSION,
+        "NSHumanReadableCopyright": "Copyright © 2026 Berkay Yılmaz",
+        "NSRequiresAquaSystemAppearance": False,
+        "LSMinimumSystemVersion": "11.0",
+        "LSArchitecturePriority": ["arm64"],
     },
 )
