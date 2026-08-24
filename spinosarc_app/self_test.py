@@ -53,12 +53,18 @@ def standalone_runtime_preflight() -> dict:
         text=True,
         timeout=30,
     )
-    if completed.returncode != 0:
+    version_output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if part
+    ).strip()
+    # dcm2niix currently prints a valid version for ``--version`` but may
+    # return a non-zero CLI status because no input folder was supplied.  The
+    # executable-start check is the stable version signature, not that
+    # input-validation status.
+    if "dcm2niix version" not in version_output.lower():
         raise RuntimeError(
             "Bundled dcm2niix did not start: "
             f"{completed.stderr or completed.stdout}"
         )
-    version_output = (completed.stdout or completed.stderr or "").strip()
     if not hasattr(gui, "SpinoSarcWindow"):
         raise RuntimeError("SpinoSarc GUI entry point is missing")
 
