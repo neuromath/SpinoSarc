@@ -55,6 +55,12 @@ python -m totalspineseg.init_inference \
 python -c \
     "from auglab.add_trainer import add_trainer; add_trainer('nnUNetTrainerDAExt')"
 
+# Fail before the expensive PyInstaller stage if TotalSpineSeg's trainer and
+# its Kornia API are not mutually compatible.  auglab 20260109 requires the
+# compatibility exports that are present in the pinned Kornia 0.8.2 release.
+python -c \
+    "from kornia.core import Module, Tensor; from nnunetv2.training.nnUNetTrainer.nnUNetTrainerDAExt import nnUNetTrainerDAExt; print('TotalSpineSeg trainer import OK:', nnUNetTrainerDAExt.__name__)"
+
 export SPINOSARC_VERSION="$APP_VERSION"
 export SPINOSARC_MUSCLEMAP_BUILD="$MUSCLEMAP_DIR/scripts"
 export SPINOSARC_TSS_DATA_BUILD="$TSS_DATA_DIR"

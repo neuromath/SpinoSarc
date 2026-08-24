@@ -4,3 +4,6 @@
 # exactly the package set used during the release build.
 totalspineseg[nnunetv2]==20260807
 nnunetv2==2.6.2
+# auglab 20260109 imports Tensor/Module from kornia.core. Kornia 0.8.3
+# removed those compatibility exports, so keep the last compatible release.
+kornia==0.8.2
