@@ -404,7 +404,9 @@ class PickSeriesDialog(QDialog):
         self._sag_cands = sagittal_candidates
 
         lay = QVBoxLayout(self)
-        info = QLabel("Multiple candidates found. Please select which series to use:")
+        info = QLabel(
+            "Please select the axial and sagittal T2 series. "
+            "Items marked Review were not identified confidently.")
         info.setStyleSheet("font-weight: 600; color: " + NAVY + ";")
         lay.addWidget(info)
 
@@ -414,7 +416,8 @@ class PickSeriesDialog(QDialog):
         ax_lay = QVBoxLayout(ax_box)
         self.ax_combo = QComboBox()
         for c in axial_candidates:
-            label = (f"#{c['series_number']}  {c['description']}  "
+            review = " [Review]" if not c.get('is_t2', False) else ""
+            label = (f"#{c['series_number']}  {c['description']}{review}  "
                      f"({c['n_slices']} slice, {c['matrix']})")
             self.ax_combo.addItem(label, userData=c['uid'])
         if not axial_candidates:
@@ -429,7 +432,8 @@ class PickSeriesDialog(QDialog):
         sag_lay = QVBoxLayout(sag_box)
         self.sag_combo = QComboBox()
         for c in sagittal_candidates:
-            label = (f"#{c['series_number']}  {c['description']}  "
+            review = " [Review]" if not c.get('is_t2', False) else ""
+            label = (f"#{c['series_number']}  {c['description']}{review}  "
                      f"({c['n_slices']} slice, {c['matrix']})")
             self.sag_combo.addItem(label, userData=c['uid'])
         if not sagittal_candidates:
@@ -858,7 +862,11 @@ class SpinoSarcWindow(QMainWindow):
         sag_cands = out.get('sagittal_candidates', [])
 
         # multi-candidate check
-        need_dialog = (len(ax_cands) > 1) or (len(sag_cands) > 1)
+        need_dialog = (
+            out.get('selection_required', False)
+            or (len(ax_cands) > 1)
+            or (len(sag_cands) > 1)
+        )
 
         if need_dialog:
             dlg = PickSeriesDialog(ax_cands, sag_cands, self)
@@ -1741,32 +1749,22 @@ class SpinoSarcWindow(QMainWindow):
             self.levels_list.addItem(item)
 
     def _make_slice_nifti(self, ax_idx):
-        """Produce a single-slice NIfTI for the given axial slice index using
-        the proven per-slice dcm2niix flow. Returns path str or None.
-        Shared by single-slice Analyze and multi-level analysis."""
+        """Produce one NIfTI from an already decoded classic/enhanced frame."""
         if not self.axial_slices:
             return None
         if ax_idx < 0 or ax_idx >= len(self.axial_slices):
             return None
         slc = self.axial_slices[ax_idx]
-        src_dicom = slc.get('source_path')
-        if src_dicom is None or not Path(src_dicom).exists():
-            return None
-        import shutil as _shutil
-        import subprocess as _sp
-        from .dicom_loader import _resolve_dcm2niix
         tmp_dir = Path(tempfile.gettempdir()) / f"spinosarc_slice_{ax_idx}"
-        if tmp_dir.exists():
-            _shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True)
-        tmp_src_dir = tmp_dir / "src"
-        tmp_src_dir.mkdir()
-        _shutil.copy2(src_dicom, str(tmp_src_dir))
-        dcm2niix_bin = _resolve_dcm2niix()
-        _sp.run([dcm2niix_bin, '-o', str(tmp_dir), '-f', 'slice', str(tmp_src_dir)],
-                capture_output=True, text=True, timeout=30)
-        niftis = list(tmp_dir.glob('slice*.nii*'))
-        return str(niftis[0]) if niftis else None
+        output_path = tmp_dir / "slice.nii.gz"
+        try:
+            from .dicom_loader import write_axial_slice_nifti
+            write_axial_slice_nifti(slc, output_path)
+            return str(output_path)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _on_analyze(self):
         if self.analyzer is None:
@@ -1775,34 +1773,14 @@ class SpinoSarcWindow(QMainWindow):
         slice_path = None
 
         if self.axial_slices:
-            # DICOM mode: use dcm2niix on the single source DICOM (proven reliable)
-            slc = self.axial_slices[self.current_slice_idx]
-            src_dicom = slc.get('source_path')
-            if src_dicom is None or not Path(src_dicom).exists():
-                QMessageBox.critical(self, "Analyze error",
-                    "Source DICOM file not found for this slice.")
+            # DICOM mode: the selected frame is already decoded. Writing it
+            # directly also supports Enhanced-MR multi-frame instances.
+            slice_path = self._make_slice_nifti(self.current_slice_idx)
+            if slice_path is None:
+                QMessageBox.critical(
+                    self, "Analyze error",
+                    "Could not prepare the selected DICOM frame for analysis.")
                 return
-
-            import shutil as _shutil
-            tmp_dir = Path(tempfile.gettempdir()) / "spinosarc_one_slice"
-            if tmp_dir.exists():
-                _shutil.rmtree(tmp_dir)
-            tmp_dir.mkdir(parents=True)
-            tmp_src_dir = tmp_dir / "src"
-            tmp_src_dir.mkdir()
-            _shutil.copy2(src_dicom, str(tmp_src_dir))
-
-            import subprocess as _sp
-            from .dicom_loader import _resolve_dcm2niix
-            dcm2niix_bin = _resolve_dcm2niix()
-            r = _sp.run([dcm2niix_bin, '-o', str(tmp_dir), '-f', 'slice', str(tmp_src_dir)],
-                       capture_output=True, text=True, timeout=30)
-            niftis = list(tmp_dir.glob('slice*.nii*'))
-            if not niftis:
-                QMessageBox.critical(self, "Analyze error",
-                    f"dcm2niix failed:\n{r.stdout[-500:]}\n{r.stderr[-500:]}")
-                return
-            slice_path = str(niftis[0])
 
         elif self.axial_data is not None:
             # NIfTI mode (eski yol)

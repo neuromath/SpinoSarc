@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Removed the invalid Torch/Torchvision version pairing from the dependency lock.
 - Removed hard-coded developer home-directory and test-DICOM paths from release builds.
+- Added standards-compliant staging for headerless PACS DICOM objects, a
+  pydicom NIfTI fallback, Enhanced-MR multi-frame decoding, and manual review
+  candidates when sequence metadata does not explicitly identify T2.
 
 ## [0.2.0] - 2026-06-25
 
