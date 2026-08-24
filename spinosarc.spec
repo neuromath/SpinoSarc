@@ -39,7 +39,7 @@ if not (MUSCLEMAP_SCRIPTS / "mm_util.py").is_file():
     raise RuntimeError(f"MuscleMap scripts not found at {MUSCLEMAP_SCRIPTS}")
 if not list((MUSCLEMAP_SCRIPTS / "models").rglob("*.pth")):
     raise RuntimeError("MuscleMap weights are missing; run build_app.sh")
-if not list(TSS_DATA.rglob("checkpoint_final.pth")):
+if not list(TSS_DATA.rglob("*.pth")):
     raise RuntimeError("TotalSpineSeg weights are missing; run build_app.sh")
 
 
