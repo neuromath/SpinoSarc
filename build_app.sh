@@ -32,7 +32,7 @@ fi
 source "$VENV_DIR/bin/activate"
 export ARCHFLAGS="-arch arm64"
 export CMAKE_POLICY_VERSION_MINIMUM="3.5"
-export MACOSX_DEPLOYMENT_TARGET="11.0"
+export MACOSX_DEPLOYMENT_TARGET="14.0"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-cache-dir -r "$ROOT_DIR/requirements-macos-build.txt"
 
