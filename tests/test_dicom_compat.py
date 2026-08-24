@@ -1,3 +1,5 @@
+import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +11,15 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 from pydicom.uid import MRImageStorage, generate_uid
 
-from spinosarc_app import dicom_loader
+
+DICOM_LOADER_PATH = (
+    Path(__file__).parents[1] / 'spinosarc_app' / 'dicom_loader.py')
+SPEC = importlib.util.spec_from_file_location(
+    'spinosarc_dicom_loader', DICOM_LOADER_PATH)
+dicom_loader = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+sys.modules[SPEC.name] = dicom_loader
+SPEC.loader.exec_module(dicom_loader)
 
 
 def _base_dataset(rows=4, columns=5):
