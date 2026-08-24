@@ -48,7 +48,8 @@ if ! grep -q "'mps'" "$TSS_INFERENCE"; then
 fi
 
 mkdir -p "$TSS_DATA_DIR"
-python -m totalspineseg.init_inference --data-dir "$TSS_DATA_DIR" --quiet
+python -m totalspineseg.init_inference \
+    --data-dir "$TSS_DATA_DIR" --store-export --quiet
 
 export SPINOSARC_VERSION="$APP_VERSION"
 export SPINOSARC_MUSCLEMAP_BUILD="$MUSCLEMAP_DIR/scripts"
