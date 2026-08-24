@@ -1,6 +1,7 @@
 name: Build Apple Silicon DMG
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -34,8 +35,10 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-          else
+          elif [[ -n "${{ inputs.version }}" ]]; then
             VERSION="${{ inputs.version }}"
+          else
+            VERSION="0.3.0"
           fi
           echo "SPINOSARC_VERSION=$VERSION" >> "$GITHUB_ENV"
 
