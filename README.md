@@ -4,7 +4,7 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20760332.svg)](https://doi.org/10.5281/zenodo.20760332)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2011%2B-blue)](https://www.apple.com/macos/)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2014%2B-blue)](https://www.apple.com/macos/)
 [![Research Use Only](https://img.shields.io/badge/Use-Research%20Only-red)](DISCLAIMER.md)
 
 
@@ -39,34 +39,30 @@ SpinoSarc is a native macOS application for automated quantitative analysis of p
 
 ### macOS (Apple Silicon: M1, M2, M3, M4)
 
-1. Download the latest release `SpinoSarc-X.Y.Z.dmg` from the [Releases](https://github.com/neuromath/spinosarc/releases) page.
-2. Open the `.dmg` file.
-3. Drag **SpinoSarc.app** to the `Applications` folder.
-4. **First launch only**: Right-click SpinoSarc.app in Applications → "Open" → "Open" again (to bypass macOS Gatekeeper, as the app is not code-signed).
+1. Download `SpinoSarc-X.Y.Z-Apple-Silicon.dmg` from the [Releases](https://github.com/neuromath/SpinoSarc/releases) page.
+2. Open the DMG and drag **SpinoSarc** to **Applications**.
+3. Open SpinoSarc normally. Signed and notarized release builds do not require Terminal or a Gatekeeper workaround.
+
+The release is self-contained: Python, PyTorch, MuscleMap, TotalSpineSeg, both sets of model weights, and dcm2niix are included. Patient images remain on the Mac and inference works offline.
 
 **System requirements:**
 
-- macOS 11.0 (Big Sur) or later
-- Apple Silicon Mac (M1 / M2 / M3 / M4)
-- ~2 GB free disk space
-- No internet connection required
+- macOS 14.0 (Sonoma) or later
+- Apple Silicon Mac (M1 / M2 / M3 / M4 or newer)
+- At least 8 GB free disk space during installation and analysis
+- No Python, Conda, Homebrew, Terminal, or internet connection required after downloading the DMG
 
 ### From source (developers)
 
 ```bash
-git clone https://github.com/neuromath/spinosarc.git
-cd spinosarc
-conda create -n spinosarc python=3.11
-conda activate spinosarc
-conda install -c conda-forge dcm2niix
-pip install -r requirements.txt
-
-# Clone MuscleMap separately (segmentation backbone)
-git clone https://github.com/MuscleMap/MuscleMap.git ~/SpinoSarc/MuscleMap
-
-# Run from source
-python -m spinosarc_app.gui
+git clone https://github.com/neuromath/SpinoSarc.git
+cd SpinoSarc
+brew install python@3.11 dcm2niix create-dmg
+SPINOSARC_PYTHON="$(brew --prefix python@3.11)/bin/python3.11" ./build_app.sh
+./build_dmg.sh
 ```
+
+The build script creates an isolated environment under `.build/`, fetches the pinned MuscleMap source and weights, downloads the pinned TotalSpineSeg weights, applies the Apple MPS patch, runs PyInstaller, signs the app, and verifies the bundled worker. Release builds are reproducible through the **Build Apple Silicon DMG** GitHub Actions workflow.
 
 ## Quick Start
 
@@ -121,7 +117,7 @@ If you use SpinoSarc in your research, please cite:
                   spine MRI},
   year         = {2026},
   url          = {https://github.com/neuromath/SpinoSarc},
-  version      = {0.1.0},
+  version      = {0.3.1},
   doi          = {10.5281/zenodo.20760332},
   orcid        = {0009-0006-3108-8991}
 }

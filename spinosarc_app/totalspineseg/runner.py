@@ -1,51 +1,39 @@
-"""
-TotalSpineSeg subprocess runner.
+"""TotalSpineSeg process runner for source and bundled macOS builds.
 
-Calls TotalSpineSeg from a separate conda environment to avoid
-dependency conflicts with SpinoSarc's own environment (MuscleMap
-uses a different nnU-Net version).
-
-Single responsibility: launch subprocess, manage errors, report progress.
-NIfTI parsing and axial slice mapping happens elsewhere (level_mapper.py).
+The release application contains TotalSpineSeg and its model weights.  A
+second invocation of the SpinoSarc executable is used as an isolated worker,
+which keeps nnU-Net state and memory out of the GUI process.  Development
+installations can still use an in-environment TotalSpineSeg or the legacy
+Conda environment.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 
 class TotalSpineSegRunner:
-    """Wraps the `totalspineseg` CLI from a separate conda environment."""
+    """Run TotalSpineSeg without requiring end users to install Conda."""
+
+    WORKER_FLAG = "--spinosarc-tss-worker"
+    PREFLIGHT_FLAG = "--spinosarc-tss-preflight"
 
     def __init__(self, conda_env_name: str = "totalspineseg"):
         self.conda_env_name = conda_env_name
-        self._conda_exe: Optional[str] = None
-
-    # ------------------------------------------------------------------
-    # Availability check
-    # ------------------------------------------------------------------
+        self._backend: Optional[list[str]] = None
 
     def _find_conda(self) -> Optional[str]:
-        """Locate the conda executable.
-
-        Returns absolute path to conda, or None if not found.
-        Caches the result.
-        """
-        if self._conda_exe is not None:
-            return self._conda_exe
-
-        # 1) PATH lookup
         conda = shutil.which("conda")
         if conda:
-            self._conda_exe = conda
             return conda
-
-        # 2) Common install paths on macOS
         for candidate in (
             "/opt/anaconda3/bin/conda",
             "/opt/miniconda3/bin/conda",
@@ -53,234 +41,270 @@ class TotalSpineSegRunner:
             os.path.expanduser("~/miniconda3/bin/conda"),
         ):
             if os.path.isfile(candidate):
-                self._conda_exe = candidate
                 return candidate
+        return None
 
+    def _resolve_backend(self) -> Optional[list[str]]:
+        """Return the command prefix for the best available runtime."""
+        if self._backend is not None:
+            return list(self._backend)
+
+        override = os.environ.get("SPINOSARC_TSS_EXECUTABLE")
+        if override and Path(override).is_file():
+            self._backend = [override]
+            return list(self._backend)
+
+        # PyInstaller release: invoke this app's executable in worker mode.
+        if getattr(sys, "frozen", False):
+            self._backend = [sys.executable, self.WORKER_FLAG]
+            return list(self._backend)
+
+        # Developer install with TotalSpineSeg in the active Python env.
+        if importlib.util.find_spec("totalspineseg.inference") is not None:
+            self._backend = [sys.executable, "-m", "totalspineseg.inference"]
+            return list(self._backend)
+
+        # Backward-compatible fallback for existing developer machines.
+        conda = self._find_conda()
+        if conda:
+            self._backend = [
+                conda, "run", "-n", self.conda_env_name, "totalspineseg"
+            ]
+            return list(self._backend)
         return None
 
     def is_available(self) -> bool:
-        """Check whether `totalspineseg` is callable in the configured env.
-
-        Returns True only if both conda is found and the env contains the
-        `totalspineseg` executable. Quick to call - meant for startup
-        checks (e.g. enable/disable a GUI button).
-        """
-        conda = self._find_conda()
-        if conda is None:
+        backend = self._resolve_backend()
+        if not backend:
             return False
-
+        command = [*backend, "--help"]
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, self.PREFLIGHT_FLAG]
         try:
-            r = subprocess.run(
-                [conda, "run", "-n", self.conda_env_name,
-                 "totalspineseg", "--help"],
+            result = subprocess.run(
+                command,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=180,
+                env=self._worker_env("cpu"),
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return False
+        return result.returncode == 0
 
-        return r.returncode == 0
+    @staticmethod
+    def _worker_env(device: str = "cpu") -> dict[str, str]:
+        env = os.environ.copy()
+        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        if device == "cpu":
+            threads = str(max(1, min(os.cpu_count() or 1, 6)))
+            env["OMP_NUM_THREADS"] = threads
+            env["VECLIB_MAXIMUM_THREADS"] = threads
+        else:
+            env["OMP_NUM_THREADS"] = "1"
+            env["VECLIB_MAXIMUM_THREADS"] = "1"
+        return env
 
-    # ------------------------------------------------------------------
-    # Main run
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _worker_limits() -> tuple[int, int]:
+        """Conservative worker counts for 8–16 GB Apple Silicon Macs."""
+        try:
+            import psutil
 
-    def run(
+            memory_gb = psutil.virtual_memory().total / 2**30
+        except Exception:
+            memory_gb = 8.0
+        general = 1 if memory_gb < 12 else 2 if memory_gb < 24 else 4
+        return general, 1
+
+    def _command(
         self,
         sagittal_nifti_path: str,
         output_dir: str,
-        device: str = "mps",
-        step1_only: bool = True,
-        iso: bool = True,
-        progress_callback: Optional[Callable[[str], None]] = None,
-    ) -> dict:
-        """Run TotalSpineSeg on a sagittal NIfTI volume.
-
-        Parameters
-        ----------
-        sagittal_nifti_path
-            Absolute path to a sagittal NIfTI (`.nii` or `.nii.gz`).
-            Must be a single file; TotalSpineSeg's input folder will be
-            created internally.
-        output_dir
-            Absolute path where TotalSpineSeg will write its outputs.
-            Will be created if missing. Existing contents are NOT erased.
-        device
-            "mps" (Apple Silicon), "cuda" (NVIDIA), or "cpu".
-            Defaults to "mps". The TotalSpineSeg installation must have
-            our MPS support patch applied for "mps" to work.
-        step1_only
-            If True, pass `--step1` (faster, vertebra-level identification only).
-            If False, runs the full two-step pipeline (slower, individual labels).
-        iso
-            If True, pass `--iso` (1mm isotropic output, easier downstream
-            processing). Defaults to True.
-        progress_callback
-            Optional callable taking a single status string. Called at
-            start, intermediate milestones (if available), and end.
-
-        Returns
-        -------
-        dict
-            On success:
-                {
-                    "success": True,
-                    "output_dir": <absolute path>,
-                    "duration_sec": <float>,
-                    "command": <list of strings>,
-                }
-            On failure:
-                {
-                    "success": False,
-                    "error": <human-readable string>,
-                    "stdout": <last 2000 chars>,
-                    "stderr": <last 2000 chars>,
-                    "command": <list of strings>,
-                    "duration_sec": <float>,
-                }
-        """
-        def _emit(msg: str) -> None:
-            if progress_callback is not None:
-                try:
-                    progress_callback(msg)
-                except Exception:
-                    # progress callback errors should not break inference
-                    pass
-
-        # ------ validate input ------
-        sag = Path(sagittal_nifti_path)
-        if not sag.is_file():
-            return {
-                "success": False,
-                "error": f"Sagittal NIfTI not found: {sagittal_nifti_path}",
-                "stdout": "",
-                "stderr": "",
-                "command": [],
-                "duration_sec": 0.0,
-            }
-        if sag.suffix not in (".nii",) and "".join(sag.suffixes[-2:]) != ".nii.gz":
-            return {
-                "success": False,
-                "error": f"Input is not a NIfTI file: {sagittal_nifti_path}",
-                "stdout": "",
-                "stderr": "",
-                "command": [],
-                "duration_sec": 0.0,
-            }
-
-        # ------ resolve conda ------
-        conda = self._find_conda()
-        if conda is None:
-            return {
-                "success": False,
-                "error": "conda executable not found",
-                "stdout": "",
-                "stderr": "",
-                "command": [],
-                "duration_sec": 0.0,
-            }
-
-        # ------ prepare a single-file input folder ------
-        # TotalSpineSeg accepts either a single file OR a folder. To keep
-        # the output deterministic (named by input filename), we always
-        # pass the file directly. But we still need an output folder.
-        out = Path(output_dir).resolve()
-        out.mkdir(parents=True, exist_ok=True)
-
-        # ------ build command ------
+        device: str,
+        step1_only: bool,
+        iso: bool,
+    ) -> list[str]:
+        backend = self._resolve_backend()
+        if not backend:
+            return []
+        max_workers, max_workers_nnunet = self._worker_limits()
         cmd = [
-            conda, "run", "-n", self.conda_env_name,
-            "totalspineseg",
-            str(sag.resolve()),
-            str(out),
+            *backend,
+            str(Path(sagittal_nifti_path).resolve()),
+            str(Path(output_dir).resolve()),
             "--device", device,
+            "--max-workers", str(max_workers),
+            "--max-workers-nnunet", str(max_workers_nnunet),
+            "--keep-only", "step1_output", "step1_canal", "step1_levels",
+            "--quiet",
         ]
         if step1_only:
             cmd.append("--step1")
         if iso:
             cmd.append("--iso")
+        return cmd
 
-        _emit("Starting TotalSpineSeg...")
+    @staticmethod
+    def _clear_output(path: Path) -> None:
+        if path.exists():
+            for child in path.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
-        # ------ run ------
-        t0 = time.time()
-        try:
-            r = subprocess.run(
+    def run(
+        self,
+        sagittal_nifti_path: str,
+        output_dir: str,
+        device: str = "cpu",
+        step1_only: bool = True,
+        iso: bool = True,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        def emit(message: str) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(message)
+                except Exception:
+                    pass
+
+        sag = Path(sagittal_nifti_path)
+        if not sag.is_file():
+            return self._error(f"Sagittal NIfTI not found: {sag}")
+        if sag.suffix != ".nii" and "".join(sag.suffixes[-2:]) != ".nii.gz":
+            return self._error(f"Input is not a NIfTI file: {sag}")
+        if not self._resolve_backend():
+            return self._error("Bundled TotalSpineSeg runtime is unavailable")
+
+        out = Path(output_dir).resolve()
+        self._clear_output(out)
+
+        def execute(selected_device: str):
+            cmd = self._command(str(sag), str(out), selected_device, step1_only, iso)
+            start = time.time()
+            timeout_seconds = 1800 if selected_device == "cpu" else 600
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=600,  # 10 min hard cap
+                env=self._worker_env(selected_device),
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as e:
-            duration = time.time() - t0
-            _emit("TotalSpineSeg timed out")
-            return {
-                "success": False,
-                "error": (
-                    f"TotalSpineSeg timed out after {duration:.0f} seconds. "
-                    "On a Mac with MPS this should complete in ~1 minute. "
-                    "On CPU it may exceed the 10-minute cap."
-                ),
-                "stdout": (e.stdout or "")[-2000:] if hasattr(e, "stdout") else "",
-                "stderr": (e.stderr or "")[-2000:] if hasattr(e, "stderr") else "",
-                "command": cmd,
-                "duration_sec": duration,
-            }
-        except (FileNotFoundError, OSError) as e:
-            duration = time.time() - t0
-            return {
-                "success": False,
-                "error": f"Could not execute subprocess: {e}",
-                "stdout": "",
-                "stderr": "",
-                "command": cmd,
-                "duration_sec": duration,
-            }
+            timed_out = False
+            while True:
+                elapsed = time.time() - start
+                remaining = timeout_seconds - elapsed
+                if remaining <= 0:
+                    timed_out = True
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (AttributeError, ProcessLookupError, PermissionError):
+                        process.kill()
+                    stdout, stderr = process.communicate()
+                    break
+                try:
+                    stdout, stderr = process.communicate(timeout=min(15, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    minutes, seconds = divmod(int(elapsed), 60)
+                    emit(
+                        f"Detecting lumbar levels on {selected_device.upper()}… "
+                        f"{minutes}m {seconds:02d}s"
+                    )
+            result = subprocess.CompletedProcess(
+                cmd, process.returncode,
+                stdout=stdout or "", stderr=stderr or "",
+            )
+            return result, cmd, time.time() - start, timed_out
 
-        duration = time.time() - t0
+        emit("Starting reliable CPU level detection…" if device == "cpu"
+             else "Starting accelerated lumbar level detection…")
+        attempts = []
+        try:
+            result, cmd, duration, timed_out = execute(device)
+            attempts.append((device, result, duration, timed_out))
+            # TotalSpineSeg officially supports CPU/CUDA. If an optional MPS
+            # attempt fails for any reason, discard partial output and retry
+            # deterministically on CPU.
+            if device == "mps" and (timed_out or result.returncode != 0):
+                emit("Metal attempt failed; retrying safely on CPU…")
+                self._clear_output(out)
+                result, cmd, retry_duration, timed_out = execute("cpu")
+                attempts.append(("cpu", result, retry_duration, timed_out))
+                duration += retry_duration
+        except (FileNotFoundError, OSError) as exc:
+            return self._error(f"Could not start level detection: {exc}")
 
-        if r.returncode != 0:
-            _emit("TotalSpineSeg failed")
-            return {
-                "success": False,
-                "error": (
-                    f"TotalSpineSeg exited with code {r.returncode}. "
-                    "See stdout/stderr below for details."
-                ),
-                "stdout": r.stdout[-2000:] if r.stdout else "",
-                "stderr": r.stderr[-2000:] if r.stderr else "",
-                "command": cmd,
-                "duration_sec": duration,
-            }
+        if timed_out:
+            return self._error(
+                "Level detection exceeded the 30-minute CPU safety limit.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=(result.stderr or "")[-8000:],
+                command=cmd,
+                duration_sec=duration,
+            )
 
-        # ------ verify expected output exists ------
-        # step1_levels is the key output for level identification.
-        # If --step1 was used the final levels folder may be named differently;
-        # we look for both names.
-        levels_dir_candidates = [
-            out / "step1_levels",
-            out / "step2_output",  # if step1_only=False
+        if result.returncode != 0:
+            emit("Lumbar level detection failed")
+            previous = ""
+            if len(attempts) > 1:
+                first_device, first_result, _, _ = attempts[0]
+                previous = (
+                    f"\nPrevious {first_device} attempt:\n"
+                    f"{(first_result.stderr or first_result.stdout or '')[-3000:]}"
+                )
+            return self._error(
+                f"TotalSpineSeg exited with code {result.returncode}.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=((result.stderr or "")[-8000:] + previous),
+                command=cmd,
+                duration_sec=duration,
+            )
+
+        required_outputs = {
+            "step1_levels": out / "step1_levels",
+            "step1_canal": out / "step1_canal",
+        }
+        missing_outputs = [
+            name for name, folder in required_outputs.items()
+            if not folder.is_dir() or not list(folder.glob("*.nii*"))
         ]
-        if not any(p.is_dir() for p in levels_dir_candidates):
-            _emit("TotalSpineSeg finished but expected output is missing")
-            return {
-                "success": False,
-                "error": (
-                    "TotalSpineSeg exited successfully but no expected output "
-                    "directory (step1_levels or step2_output) was found in "
-                    f"{out}"
-                ),
-                "stdout": r.stdout[-2000:] if r.stdout else "",
-                "stderr": r.stderr[-2000:] if r.stderr else "",
-                "command": cmd,
-                "duration_sec": duration,
-            }
+        if missing_outputs:
+            return self._error(
+                "Level detection finished but required output is missing or "
+                f"empty: {', '.join(missing_outputs)}.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=(result.stderr or "")[-8000:],
+                command=cmd,
+                duration_sec=duration,
+            )
 
-        _emit(f"TotalSpineSeg completed in {duration:.1f}s")
+        emit(f"Lumbar level detection completed in {duration:.1f}s")
         return {
             "success": True,
             "output_dir": str(out),
             "duration_sec": duration,
             "command": cmd,
+            "device": attempts[-1][0],
+        }
+
+    @staticmethod
+    def _error(
+        message: str,
+        stdout: str = "",
+        stderr: str = "",
+        command: Optional[list[str]] = None,
+        duration_sec: float = 0.0,
+    ) -> dict:
+        return {
+            "success": False,
+            "error": message,
+            "stdout": stdout,
+            "stderr": stderr,
+            "command": command or [],
+            "duration_sec": duration_sec,
         }

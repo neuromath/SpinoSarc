@@ -5,6 +5,37 @@ All notable changes to SpinoSarc are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.3.1] - 2026-08-24
+
+### Added
+- Frozen release checks that import the GUI/Excel stack, execute the bundled dcm2niix binary, deserialize TotalSpineSeg weights, and run a real MuscleMap CPU inference before a DMG is produced.
+- Persistent diagnostics under `~/Library/Logs/SpinoSarc/SpinoSarc.log` with user-visible error details.
+- A genuinely self-contained Apple Silicon application: Python, dcm2niix, MuscleMap, TotalSpineSeg, and both model-weight sets are embedded in the app bundle.
+- An isolated TotalSpineSeg worker mode that uses the SpinoSarc executable itself; end users no longer need Conda or a second environment.
+- Reproducible arm64 GitHub Actions builds with optional Developer ID signing, Apple notarization, stapling, SHA-256 checksum generation, and automatic release upload.
+- Unit and frozen-worker smoke tests for the standalone runtime.
+
+### Changed
+- Analyze and Analyze All Levels now run in background threads and keep the interface responsive.
+- TotalSpineSeg uses its officially supported CPU path by default on Apple Silicon; optional Metal failures still retry on CPU.
+- Lumbar level detection now runs in a background thread so the interface remains responsive.
+- Worker counts are memory-aware for 8–16 GB Macs; MPS-specific failures retry safely on CPU.
+- Bundle identifiers and all application/DMG version fields now use the release version consistently.
+
+### Fixed
+- Imported the missing `LevelMapper`, which previously made completed TotalSpineSeg runs fail during result parsing.
+- Removed the obsolete 90-degree DICOM mask rotation and added strict frame/segmentation shape validation.
+- MuscleMap now retries on CPU after an unsupported MPS operation and removes partial inference output before retrying.
+- Cleared stale level/canal/multi-level state between patients and bundled the previously missing `openpyxl` Excel dependency.
+- Embedded TotalSpineSeg's custom nnU-Net trainer before code signing so inference and release checks never modify the application bundle.
+- Removed the invalid Torch/Torchvision version pairing from the dependency lock.
+- Removed hard-coded developer home-directory and test-DICOM paths from release builds.
+- Added standards-compliant staging for headerless PACS DICOM objects, a
+  pydicom NIfTI fallback, Enhanced-MR multi-frame decoding, and manual review
+  candidates when sequence metadata does not explicitly identify T2.
+
 ## [0.2.0] - 2026-06-25
 
 ### Added
@@ -47,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single-page PDF report and Excel export.
 - Native macOS desktop application (Apple Silicon).
 
+[0.3.1]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.3.1
 [0.2.0]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.2.0
 [0.1.1]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.1.0
