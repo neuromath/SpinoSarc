@@ -30,8 +30,8 @@ pydicom==3.0.2
 pyinstaller==6.20.0
 pyinstaller-hooks-contrib==2026.6
 pylibjpeg==2.1.0
-pylibjpeg-libjpeg==2.4.0
-pylibjpeg-openjpeg==2.5.0
+pylibjpeg-libjpeg==2.1.0
+pylibjpeg-openjpeg==2.1.0
 pyparsing==3.3.2
 PyQt6==6.11.0
 PyQt6-Qt6==6.11.1
