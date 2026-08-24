@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the obsolete 90-degree DICOM mask rotation and added strict frame/segmentation shape validation.
 - MuscleMap now retries on CPU after an unsupported MPS operation and removes partial inference output before retrying.
 - Cleared stale level/canal/multi-level state between patients and bundled the previously missing `openpyxl` Excel dependency.
+- Embedded TotalSpineSeg's custom nnU-Net trainer before code signing so inference and release checks never modify the application bundle.
 - Removed the invalid Torch/Torchvision version pairing from the dependency lock.
 - Removed hard-coded developer home-directory and test-DICOM paths from release builds.
 - Added standards-compliant staging for headerless PACS DICOM objects, a
@@ -81,4 +82,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.2.0
 [0.1.1]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.1.1
 [0.1.0]: https://github.com/neuromath/SpinoSarc/releases/tag/v0.1.0
-

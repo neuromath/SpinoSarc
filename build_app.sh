@@ -49,6 +49,12 @@ mkdir -p "$TSS_DATA_DIR"
 python -m totalspineseg.init_inference \
     --data-dir "$TSS_DATA_DIR" --store-export --quiet
 
+# Install the custom trainer into this ephemeral build environment so
+# PyInstaller discovers it as an nnunetv2 module.  The spec also embeds the
+# source file explicitly; the signed application never performs this copy.
+python -c \
+    "from auglab.add_trainer import add_trainer; add_trainer('nnUNetTrainerDAExt')"
+
 export SPINOSARC_VERSION="$APP_VERSION"
 export SPINOSARC_MUSCLEMAP_BUILD="$MUSCLEMAP_DIR/scripts"
 export SPINOSARC_TSS_DATA_BUILD="$TSS_DATA_DIR"
@@ -76,9 +82,9 @@ APP_EXEC="$APP/Contents/MacOS/SpinoSarc"
 LOG_PATH="$HOME/Library/Logs/SpinoSarc/SpinoSarc.log"
 
 run_release_check() {
-    local check_flag="$1"
-    if ! "$APP_EXEC" "$check_flag"; then
-        echo "ERROR: Frozen release check failed: $check_flag"
+    local check_label="$*"
+    if ! "$APP_EXEC" "$@"; then
+        echo "ERROR: Frozen release check failed: $check_label"
         if [[ -f "$LOG_PATH" ]]; then
             tail -n 200 "$LOG_PATH"
         fi
@@ -92,6 +98,10 @@ run_release_check() {
 run_release_check --spinosarc-runtime-preflight
 run_release_check --spinosarc-tss-preflight
 run_release_check --spinosarc-musclemap-self-test
+run_release_check --spinosarc-tss-worker --help
+
+# The checks above must not mutate the signed application bundle.
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "Built $APP"
 du -sh "$APP"

@@ -2,9 +2,12 @@
 """PyInstaller recipe for the self-contained Apple Silicon application."""
 
 import os
+import importlib.resources
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_all, collect_data_files, copy_metadata,
+)
 
 
 PROJECT_ROOT = Path(SPECPATH).resolve()
@@ -52,6 +55,27 @@ datas = [
 binaries = [(DCM2NIIX_BIN, "bin")]
 hiddenimports = ["mm_util"]
 
+# TotalSpineSeg's nnUNetTrainerDAExt normally copies itself into nnunetv2 on
+# first inference.  A signed macOS application must never mutate its own
+# bundle, so embed the trainer at that exact import path during the build.
+try:
+    from auglab import trainers as auglab_trainers
+
+    TRAINER_SOURCE = (
+        Path(str(importlib.resources.files(auglab_trainers))) /
+        "nnUNetTrainerDAExt.py"
+    )
+    if not TRAINER_SOURCE.is_file():
+        raise FileNotFoundError(TRAINER_SOURCE)
+    datas.append((
+        str(TRAINER_SOURCE), "nnunetv2/training/nnUNetTrainer"))
+    hiddenimports.append(
+        "nnunetv2.training.nnUNetTrainer.nnUNetTrainerDAExt")
+except Exception as exc:
+    raise RuntimeError(
+        f"Could not bundle TotalSpineSeg's custom nnU-Net trainer: {exc}"
+    ) from exc
+
 # TotalSpineSeg and nnU-Net rely on plugin-style/dynamic imports.  Collecting
 # their package data and submodules at build time makes the release independent
 # of Python, pip, Conda, and the network on the radiologist's Mac.
@@ -59,7 +83,7 @@ packages = [
     "pylibjpeg", "libjpeg", "openjpeg", "monai", "nibabel", "pydicom",
     "skimage", "reportlab", "openpyxl", "totalspineseg", "nnunetv2", "auglab",
     "batchgenerators", "dynamic_network_architectures", "acvl_utils",
-    "torchio", "nilearn", "gryds",
+    "torchio", "nilearn", "gryds", "kornia",
 ]
 for package in packages:
     try:
@@ -69,6 +93,20 @@ for package in packages:
         hiddenimports.extend(package_hidden)
     except Exception as exc:
         print(f"[spec] collect_all({package}) warning: {exc}")
+
+# TorchScript and nnU-Net's recursive trainer discovery use inspect/filesystem
+# access at runtime.  Pure modules stored only in PyInstaller's PYZ archive do
+# not expose source lines, so preserve source files for these packages.
+for source_package in (
+    "kornia", "auglab", "nnunetv2", "dynamic_network_architectures",
+):
+    try:
+        datas.extend(collect_data_files(
+            source_package, include_py_files=True))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not collect runtime source for {source_package}: {exc}"
+        ) from exc
 
 for distribution in (
     "totalspineseg", "nnunetv2", "dynamic-network-architectures",

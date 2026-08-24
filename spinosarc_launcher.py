@@ -110,6 +110,23 @@ def _run_totalspineseg_worker() -> None:
         if bundled_data.is_dir() and "--data-dir" not in sys.argv and "-d" not in sys.argv:
             sys.argv.extend(["--data-dir", str(bundled_data)])
 
+        # TotalSpineSeg normally copies nnUNetTrainerDAExt into nnunetv2 at
+        # first inference.  The release embeds that trainer before signing;
+        # replace the installer with an import check so the .app is immutable.
+        import importlib
+
+        trainer_module_name = (
+            "nnunetv2.training.nnUNetTrainer.nnUNetTrainerDAExt")
+        importlib.import_module(trainer_module_name)
+        trainer_installer = importlib.import_module("auglab.add_trainer")
+
+        def _use_bundled_trainer(trainer_name, overwrite=False):
+            if trainer_name != "nnUNetTrainerDAExt":
+                raise ValueError(f"Unexpected nnU-Net trainer: {trainer_name}")
+            return importlib.import_module(trainer_module_name)
+
+        trainer_installer.add_trainer = _use_bundled_trainer
+
     from totalspineseg.inference import main as totalspineseg_main
 
     totalspineseg_main()

@@ -154,10 +154,11 @@ def totalspineseg_preflight() -> dict:
     del checkpoint_data
     gc.collect()
 
-    from auglab.add_trainer import add_trainer
+    import importlib
     from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
-    add_trainer("nnUNetTrainerDAExt")
+    trainer_module = importlib.import_module(
+        "nnunetv2.training.nnUNetTrainer.nnUNetTrainerDAExt")
     torch.set_num_threads(1)
     predictor = nnUNetPredictor(
         tile_step_size=0.5,
@@ -185,6 +186,7 @@ def totalspineseg_preflight() -> dict:
         "datasets": datasets,
         "checkpoint_keys": checkpoint_keys,
         "network_class": network_class,
+        "trainer_module": trainer_module.__name__,
         "totalspineseg_module": str(
             Path(totalspineseg.__file__).resolve()
             if getattr(totalspineseg, "__file__", None) else "namespace"
