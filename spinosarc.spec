@@ -149,7 +149,7 @@ app = BUNDLE(
         "CFBundleShortVersionString": APP_VERSION,
         "NSHumanReadableCopyright": "Copyright © 2026 Berkay Yılmaz",
         "NSRequiresAquaSystemAppearance": False,
-        "LSMinimumSystemVersion": "11.0",
+        "LSMinimumSystemVersion": "14.0",
         "LSArchitecturePriority": ["arm64"],
     },
 )
