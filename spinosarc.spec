@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 PROJECT_ROOT = Path(SPECPATH).resolve()
-APP_VERSION = os.environ.get("SPINOSARC_VERSION", "0.3.0")
+APP_VERSION = os.environ.get("SPINOSARC_VERSION", "0.3.1")
 MUSCLEMAP_SCRIPTS = Path(
     os.environ.get(
         "SPINOSARC_MUSCLEMAP_BUILD",
@@ -39,6 +39,8 @@ if not (MUSCLEMAP_SCRIPTS / "mm_util.py").is_file():
     raise RuntimeError(f"MuscleMap scripts not found at {MUSCLEMAP_SCRIPTS}")
 if not list((MUSCLEMAP_SCRIPTS / "models").rglob("*.pth")):
     raise RuntimeError("MuscleMap weights are missing; run build_app.sh")
+if not list((MUSCLEMAP_SCRIPTS / "models").rglob("*.json")):
+    raise RuntimeError("MuscleMap model config is missing; run build_app.sh")
 if not list(TSS_DATA.rglob("*.pth")):
     raise RuntimeError("TotalSpineSeg weights are missing; run build_app.sh")
 
@@ -55,7 +57,7 @@ hiddenimports = ["mm_util"]
 # of Python, pip, Conda, and the network on the radiologist's Mac.
 packages = [
     "pylibjpeg", "libjpeg", "openjpeg", "monai", "nibabel", "pydicom",
-    "skimage", "reportlab", "totalspineseg", "nnunetv2", "auglab",
+    "skimage", "reportlab", "openpyxl", "totalspineseg", "nnunetv2", "auglab",
     "batchgenerators", "dynamic_network_architectures", "acvl_utils",
     "torchio", "nilearn", "gryds",
 ]

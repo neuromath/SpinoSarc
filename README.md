@@ -117,7 +117,7 @@ If you use SpinoSarc in your research, please cite:
                   spine MRI},
   year         = {2026},
   url          = {https://github.com/neuromath/SpinoSarc},
-  version      = {0.3.0},
+  version      = {0.3.1},
   doi          = {10.5281/zenodo.20760332},
   orcid        = {0009-0006-3108-8991}
 }

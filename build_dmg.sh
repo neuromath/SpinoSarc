@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT_DIR/dist/SpinoSarc.app"
-VERSION="${SPINOSARC_VERSION:-0.3.0}"
+VERSION="${SPINOSARC_VERSION:-0.3.1}"
 DMG_PATH="$ROOT_DIR/dist/SpinoSarc-${VERSION}-Apple-Silicon.dmg"
 STAGING="$ROOT_DIR/dist/dmg-staging"
 

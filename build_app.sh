@@ -7,7 +7,7 @@ VENV_DIR="$BUILD_DIR/venv"
 MUSCLEMAP_DIR="$BUILD_DIR/vendor/MuscleMap"
 TSS_DATA_DIR="$BUILD_DIR/totalspineseg_data"
 MUSCLEMAP_COMMIT="d11df779a4e146e7e913b89cb202fc06a6e2ef6a"
-APP_VERSION="${SPINOSARC_VERSION:-0.3.0}"
+APP_VERSION="${SPINOSARC_VERSION:-0.3.1}"
 PYTHON_BIN="${SPINOSARC_PYTHON:-python3}"
 
 if [[ "$(uname -m)" != "arm64" ]]; then
@@ -32,7 +32,7 @@ fi
 source "$VENV_DIR/bin/activate"
 export ARCHFLAGS="-arch arm64"
 export CMAKE_POLICY_VERSION_MINIMUM="3.5"
-export MACOSX_DEPLOYMENT_TARGET="14.0"
+export MACOSX_DEPLOYMENT_TARGET="11.0"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-cache-dir -r "$ROOT_DIR/requirements-macos-build.txt"
 
@@ -44,11 +44,6 @@ git -C "$MUSCLEMAP_DIR" checkout --detach "$MUSCLEMAP_COMMIT"
 
 PYTHONPATH="$MUSCLEMAP_DIR/scripts" python -c \
     "from mm_util import ensure_model_downloaded; ensure_model_downloaded('abdomen', 'latest')"
-
-TSS_INFERENCE="$(python -c 'import totalspineseg.inference as m; print(m.__file__)')"
-if ! grep -q "'mps'" "$TSS_INFERENCE"; then
-    patch "$TSS_INFERENCE" < "$ROOT_DIR/patches/totalspineseg_mps_support.patch"
-fi
 
 mkdir -p "$TSS_DATA_DIR"
 python -m totalspineseg.init_inference \
@@ -76,7 +71,27 @@ else
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP"
-"$APP/Contents/MacOS/SpinoSarc" --spinosarc-tss-worker --help >/dev/null
+
+APP_EXEC="$APP/Contents/MacOS/SpinoSarc"
+LOG_PATH="$HOME/Library/Logs/SpinoSarc/SpinoSarc.log"
+
+run_release_check() {
+    local check_flag="$1"
+    if ! "$APP_EXEC" "$check_flag"; then
+        echo "ERROR: Frozen release check failed: $check_flag"
+        if [[ -f "$LOG_PATH" ]]; then
+            tail -n 200 "$LOG_PATH"
+        fi
+        exit 1
+    fi
+}
+
+# Import every user-facing runtime, execute the bundled dcm2niix binary,
+# deserialize TotalSpineSeg's actual step-1 checkpoint, and perform a real
+# MuscleMap CPU forward pass.  A DMG is never produced if any check fails.
+run_release_check --spinosarc-runtime-preflight
+run_release_check --spinosarc-tss-preflight
+run_release_check --spinosarc-musclemap-self-test
 
 echo "Built $APP"
 du -sh "$APP"

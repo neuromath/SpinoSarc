@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import nibabel as nib
 import numpy as np
@@ -136,6 +137,59 @@ class DicomCompatibilityTests(unittest.TestCase):
         }]
         self.assertEqual(
             dicom_loader.pick_orientation_candidates(rows, 'axial'), rows)
+
+    def test_pydicom_volume_fallback_recovers_dcm2niix_exit_2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = []
+            for index in range(3):
+                source = root / f"source_{index}"
+                ds = _base_dataset(rows=4, columns=5)
+                ds.InstanceNumber = index + 1
+                ds.ImageOrientationPatient = [0, 1, 0, 0, 0, -1]
+                ds.ImagePositionPatient = [-index * 4.0, 0, 0]
+                ds.PixelData = (
+                    np.arange(20, dtype=np.uint16) + index * 20
+                ).tobytes()
+                _write_non_part10(source, ds)
+                sources.append(source)
+
+            series = {
+                'uid': '1.2.840.10008.123456789012',
+                'series_number': 7,
+                'files': sources,
+            }
+            failed = mock.Mock(returncode=2, stdout='dcm2niix version',
+                               stderr='Unable to find any DICOM images')
+            with mock.patch.object(
+                    dicom_loader, '_check_dcm2niix', return_value='/fake/dcm2niix'), \
+                 mock.patch.object(dicom_loader.subprocess, 'run',
+                                   return_value=failed):
+                outputs = dicom_loader.convert_series_to_nifti(
+                    series, root / 'work')
+
+            self.assertEqual(len(outputs), 1)
+            image = nib.load(str(outputs[0]))
+            self.assertEqual(image.shape, (4, 5, 3))
+            self.assertEqual(
+                int(np.abs(image.affine[:3, 2]).argmax()), 0)
+
+    def test_segmentation_alignment_preserves_direct_frame_space(self):
+        segmentation = np.arange(20, dtype=np.int16).reshape(4, 5)
+        aligned = dicom_loader.align_segmentation_to_frame(
+            segmentation, (4, 5))
+        np.testing.assert_array_equal(aligned, segmentation)
+
+    def test_segmentation_alignment_accepts_legacy_transpose_only(self):
+        segmentation = np.arange(20, dtype=np.int16).reshape(5, 4)
+        aligned = dicom_loader.align_segmentation_to_frame(
+            segmentation, (4, 5))
+        np.testing.assert_array_equal(aligned, segmentation.T)
+
+    def test_segmentation_alignment_rejects_unrelated_shape(self):
+        with self.assertRaisesRegex(ValueError, 'shape mismatch'):
+            dicom_loader.align_segmentation_to_frame(
+                np.zeros((3, 7), dtype=np.int16), (4, 5))
 
 
 if __name__ == '__main__':

@@ -6,6 +6,8 @@ Setup once, segment many times. Model stays in RAM.
 import os
 import sys
 import logging
+import shutil
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -26,20 +28,21 @@ def _resolve_musclemap_path():
     """MuscleMap scripts klasörünü bul. PyInstaller bundle veya dev mode.
 
     Sıra:
-    1. SPINOSARC_MUSCLEMAP_PATH env var (manuel override)
-    2. PyInstaller bundle: sys._MEIPASS/musclemap_scripts
+    1. PyInstaller bundle: sys._MEIPASS/musclemap_scripts
+    2. SPINOSARC_MUSCLEMAP_PATH env var (dev-mode override)
     3. Dev mode: ~/SpinoSarc/MuscleMap/scripts (Berkay'in makinesi)
     """
-    # 1) Env var override
-    env_path = os.environ.get('SPINOSARC_MUSCLEMAP_PATH')
-    if env_path and Path(env_path).is_dir():
-        return Path(env_path)
-
-    # 2) PyInstaller frozen bundle
+    # 1) A frozen release must always use its own tested model files.  This
+    # also makes release self-tests validate the bundle rather than .build/.
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         bundle_path = Path(sys._MEIPASS) / 'musclemap_scripts'
         if bundle_path.is_dir():
             return bundle_path
+
+    # 2) Dev-mode override
+    env_path = os.environ.get('SPINOSARC_MUSCLEMAP_PATH')
+    if env_path and Path(env_path).is_dir():
+        return Path(env_path)
 
     # 3) Dev mode fallback
     dev_path = Path.home() / 'SpinoSarc' / 'MuscleMap' / 'scripts'
@@ -53,11 +56,31 @@ if str(_MM_PATH) not in sys.path:
 from mm_util import (
     get_model_and_config_paths, load_model_config,
     SqueezeTransform, RemapLabels, run_inference,
-    ensure_model_downloaded,
 )
 
 
 log = logging.getLogger(__name__)
+
+
+def _find_bundled_model(region: str):
+    """Return a frozen model/config pair without any network lookup."""
+    if not getattr(sys, 'frozen', False):
+        return None
+    model_root = _MM_PATH / 'models' / region
+    pairs = []
+    if model_root.is_dir():
+        for model_path in model_root.rglob('*.pth'):
+            config_path = model_path.with_suffix('.json')
+            if config_path.is_file():
+                pairs.append((model_path, config_path))
+    if not pairs:
+        raise FileNotFoundError(
+            f"Bundled MuscleMap model/config pair is missing for {region}"
+        )
+    # Version folders use names such as v1.2.  The build downloads exactly
+    # one pinned latest snapshot; sorting also makes multiple cached versions
+    # deterministic if the vendor tree happens to contain more than one.
+    return sorted(pairs, key=lambda pair: str(pair[0]))[-1]
 
 
 class MuscleMapEngine:
@@ -94,15 +117,14 @@ class MuscleMapEngine:
         else:
             self.amp_context = nullcontext()
 
-        # 3) Model + config yolu - cache yoksa Zenodo'dan indir
-        try:
-            self.model_path, self.config_path = get_model_and_config_paths(
-                region, None, model_version
-            )
-        except Exception:
-            # Cache yoksa indir
-            log.info(f"Downloading model: {region} v{model_version}")
-            ensure_model_downloaded(region, model_version)
+        # 3) Frozen releases always use the bundled, build-tested snapshot and
+        # never contact Zenodo or try to modify the signed application bundle.
+        bundled_pair = _find_bundled_model(region)
+        if bundled_pair is not None:
+            self.model_path = str(bundled_pair[0])
+            self.config_path = str(bundled_pair[1])
+        else:
+            # Developer installs retain MuscleMap's cache/download behavior.
             self.model_path, self.config_path = get_model_and_config_paths(
                 region, None, model_version
             )
@@ -185,6 +207,30 @@ class MuscleMapEngine:
 
         log.info(f"MuscleMapEngine ready: region={region}, device={self.device}")
 
+    @staticmethod
+    def _is_mps_runtime_error(exc: Exception) -> bool:
+        if isinstance(exc, (RuntimeError, NotImplementedError)):
+            return True
+        text = str(exc).lower()
+        return any(marker in text for marker in (
+            'mps', 'metal', 'placeholder storage', 'not implemented',
+        ))
+
+    def _fall_back_to_cpu(self) -> None:
+        """Move the already loaded network to CPU after an MPS failure."""
+        if self.device.type == 'cpu':
+            return
+        log.warning("MuscleMap MPS inference failed; moving model to CPU")
+        try:
+            if hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+        self.device = torch.device('cpu')
+        self.amp_context = nullcontext()
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
     def segment(self, image_path: str, output_dir: str = None) -> np.ndarray:
         """
         Segment a NIfTI 2D slice or 3D volume.
@@ -194,28 +240,40 @@ class MuscleMapEngine:
         image_path = str(image_path)
         write_disk = output_dir is not None
         if not write_disk:
-            import tempfile
             output_dir = tempfile.mkdtemp(prefix='mm_inference_')
 
-        out_path = run_inference(
-            image_path,
-            output_dir,
-            self.pre_transforms,
-            self.post_transforms,
-            self.amp_context,
-            self.chunk_size,
-            self.device,
-            self.inferer,
-            self.model,
-            out_channels=self.out_channels,
-            target_pixdim=self.pix_dim,
-        )
+        def run_once():
+            return run_inference(
+                image_path,
+                output_dir,
+                self.pre_transforms,
+                self.post_transforms,
+                self.amp_context,
+                self.chunk_size,
+                self.device,
+                self.inferer,
+                self.model,
+                out_channels=self.out_channels,
+                target_pixdim=self.pix_dim,
+            )
 
-        # Load segmentation back as numpy
-        seg = nib.load(out_path).get_fdata().astype(np.int16)
+        try:
+            try:
+                out_path = run_once()
+            except Exception as exc:
+                if self.device.type != 'mps' or not self._is_mps_runtime_error(exc):
+                    raise
+                self._fall_back_to_cpu()
+                # Remove partial inference output before the deterministic retry.
+                for child in Path(output_dir).iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                out_path = run_once()
 
-        if not write_disk:
-            import shutil
-            shutil.rmtree(output_dir, ignore_errors=True)
-
-        return seg
+            seg = nib.load(out_path).get_fdata().astype(np.int16)
+            return seg
+        finally:
+            if not write_disk:
+                shutil.rmtree(output_dir, ignore_errors=True)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ class TotalSpineSegRunner:
     """Run TotalSpineSeg without requiring end users to install Conda."""
 
     WORKER_FLAG = "--spinosarc-tss-worker"
+    PREFLIGHT_FLAG = "--spinosarc-tss-preflight"
 
     def __init__(self, conda_env_name: str = "totalspineseg"):
         self.conda_env_name = conda_env_name
@@ -75,24 +77,32 @@ class TotalSpineSegRunner:
         backend = self._resolve_backend()
         if not backend:
             return False
+        command = [*backend, "--help"]
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, self.PREFLIGHT_FLAG]
         try:
             result = subprocess.run(
-                [*backend, "--help"],
+                command,
                 capture_output=True,
                 text=True,
-                timeout=60,
-                env=self._worker_env(),
+                timeout=180,
+                env=self._worker_env("cpu"),
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return False
         return result.returncode == 0
 
     @staticmethod
-    def _worker_env() -> dict[str, str]:
+    def _worker_env(device: str = "cpu") -> dict[str, str]:
         env = os.environ.copy()
-        env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        env.setdefault("OMP_NUM_THREADS", "1")
-        env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        if device == "cpu":
+            threads = str(max(1, min(os.cpu_count() or 1, 6)))
+            env["OMP_NUM_THREADS"] = threads
+            env["VECLIB_MAXIMUM_THREADS"] = threads
+        else:
+            env["OMP_NUM_THREADS"] = "1"
+            env["VECLIB_MAXIMUM_THREADS"] = "1"
         return env
 
     @staticmethod
@@ -126,6 +136,7 @@ class TotalSpineSegRunner:
             "--device", device,
             "--max-workers", str(max_workers),
             "--max-workers-nnunet", str(max_workers_nnunet),
+            "--keep-only", "step1_output", "step1_canal", "step1_levels",
             "--quiet",
         ]
         if step1_only:
@@ -135,22 +146,20 @@ class TotalSpineSegRunner:
         return cmd
 
     @staticmethod
-    def _mps_failure(stderr: str) -> bool:
-        lowered = stderr.lower()
-        markers = (
-            "mps backend",
-            "not implemented for 'mps'",
-            "not implemented for mps",
-            "placeholder storage has not been allocated on mps",
-            "mps device",
-        )
-        return any(marker in lowered for marker in markers)
+    def _clear_output(path: Path) -> None:
+        if path.exists():
+            for child in path.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
     def run(
         self,
         sagittal_nifti_path: str,
         output_dir: str,
-        device: str = "mps",
+        device: str = "cpu",
         step1_only: bool = True,
         iso: bool = True,
         progress_callback: Optional[Callable[[str], None]] = None,
@@ -171,53 +180,105 @@ class TotalSpineSegRunner:
             return self._error("Bundled TotalSpineSeg runtime is unavailable")
 
         out = Path(output_dir).resolve()
-        out.mkdir(parents=True, exist_ok=True)
+        self._clear_output(out)
 
-        def execute(selected_device: str) -> tuple[subprocess.CompletedProcess, list[str], float]:
+        def execute(selected_device: str):
             cmd = self._command(str(sag), str(out), selected_device, step1_only, iso)
             start = time.time()
-            result = subprocess.run(
+            timeout_seconds = 1800 if selected_device == "cpu" else 600
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=900,
-                env=self._worker_env(),
+                env=self._worker_env(selected_device),
+                start_new_session=True,
             )
-            return result, cmd, time.time() - start
+            timed_out = False
+            while True:
+                elapsed = time.time() - start
+                remaining = timeout_seconds - elapsed
+                if remaining <= 0:
+                    timed_out = True
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (AttributeError, ProcessLookupError, PermissionError):
+                        process.kill()
+                    stdout, stderr = process.communicate()
+                    break
+                try:
+                    stdout, stderr = process.communicate(timeout=min(15, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    minutes, seconds = divmod(int(elapsed), 60)
+                    emit(
+                        f"Detecting lumbar levels on {selected_device.upper()}… "
+                        f"{minutes}m {seconds:02d}s"
+                    )
+            result = subprocess.CompletedProcess(
+                cmd, process.returncode,
+                stdout=stdout or "", stderr=stderr or "",
+            )
+            return result, cmd, time.time() - start, timed_out
 
-        emit("Starting lumbar level detection…")
+        emit("Starting reliable CPU level detection…" if device == "cpu"
+             else "Starting accelerated lumbar level detection…")
+        attempts = []
         try:
-            result, cmd, duration = execute(device)
-            if result.returncode != 0 and device == "mps" and self._mps_failure(result.stderr):
-                emit("Metal acceleration unavailable; retrying on CPU…")
-                result, cmd, retry_duration = execute("cpu")
+            result, cmd, duration, timed_out = execute(device)
+            attempts.append((device, result, duration, timed_out))
+            # TotalSpineSeg officially supports CPU/CUDA. If an optional MPS
+            # attempt fails for any reason, discard partial output and retry
+            # deterministically on CPU.
+            if device == "mps" and (timed_out or result.returncode != 0):
+                emit("Metal attempt failed; retrying safely on CPU…")
+                self._clear_output(out)
+                result, cmd, retry_duration, timed_out = execute("cpu")
+                attempts.append(("cpu", result, retry_duration, timed_out))
                 duration += retry_duration
-        except subprocess.TimeoutExpired as exc:
-            return self._error(
-                "Level detection exceeded the 15-minute safety limit.",
-                stdout=(exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
-                stderr=(exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
-                duration_sec=900.0,
-            )
         except (FileNotFoundError, OSError) as exc:
             return self._error(f"Could not start level detection: {exc}")
 
-        if result.returncode != 0:
-            emit("Lumbar level detection failed")
+        if timed_out:
             return self._error(
-                f"TotalSpineSeg exited with code {result.returncode}.",
-                stdout=(result.stdout or "")[-4000:],
-                stderr=(result.stderr or "")[-4000:],
+                "Level detection exceeded the 30-minute CPU safety limit.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=(result.stderr or "")[-8000:],
                 command=cmd,
                 duration_sec=duration,
             )
 
-        expected = (out / "step1_levels", out / "step2_output")
-        if not any(path.is_dir() for path in expected):
+        if result.returncode != 0:
+            emit("Lumbar level detection failed")
+            previous = ""
+            if len(attempts) > 1:
+                first_device, first_result, _, _ = attempts[0]
+                previous = (
+                    f"\nPrevious {first_device} attempt:\n"
+                    f"{(first_result.stderr or first_result.stdout or '')[-3000:]}"
+                )
             return self._error(
-                "Level detection finished but its output folder is missing.",
-                stdout=(result.stdout or "")[-4000:],
-                stderr=(result.stderr or "")[-4000:],
+                f"TotalSpineSeg exited with code {result.returncode}.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=((result.stderr or "")[-8000:] + previous),
+                command=cmd,
+                duration_sec=duration,
+            )
+
+        required_outputs = {
+            "step1_levels": out / "step1_levels",
+            "step1_canal": out / "step1_canal",
+        }
+        missing_outputs = [
+            name for name, folder in required_outputs.items()
+            if not folder.is_dir() or not list(folder.glob("*.nii*"))
+        ]
+        if missing_outputs:
+            return self._error(
+                "Level detection finished but required output is missing or "
+                f"empty: {', '.join(missing_outputs)}.",
+                stdout=(result.stdout or "")[-8000:],
+                stderr=(result.stderr or "")[-8000:],
                 command=cmd,
                 duration_sec=duration,
             )
@@ -228,6 +289,7 @@ class TotalSpineSegRunner:
             "output_dir": str(out),
             "duration_sec": duration,
             "command": cmd,
+            "device": attempts[-1][0],
         }
 
     @staticmethod

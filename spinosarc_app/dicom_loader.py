@@ -38,6 +38,32 @@ except ImportError as e:
     raise ImportError("pydicom required: pip install pydicom") from e
 
 
+def align_segmentation_to_frame(segmentation, frame_shape):
+    """Return a 2-D segmentation aligned with a decoded DICOM frame.
+
+    ``write_axial_slice_nifti`` writes the decoded frame directly and MONAI's
+    inverse transform returns predictions in that original array space.  The
+    normal path is therefore identity.  A transpose is accepted only as a
+    defensive compatibility path for older inference outputs; arbitrary
+    rotations would silently put labels on the wrong anatomy.
+    """
+    seg = np.asarray(segmentation)
+    seg = np.squeeze(seg)
+    expected = tuple(int(value) for value in frame_shape)
+    if seg.ndim != 2:
+        raise ValueError(
+            f"Expected a 2-D segmentation, got shape {tuple(seg.shape)}"
+        )
+    if tuple(seg.shape) == expected:
+        return seg
+    if tuple(seg.T.shape) == expected:
+        return seg.T
+    raise ValueError(
+        "Segmentation/frame shape mismatch: "
+        f"mask={tuple(seg.shape)}, frame={expected}"
+    )
+
+
 # ----- Classification hint dictionaries -----
 AXIAL_HINTS = [
     '_TRA', ' TRA', 'TRAN', ' AX ', ' AX_', '_AX_', '_AX ', ' AX-', '-AX-',
@@ -322,16 +348,11 @@ def _resolve_dcm2niix():
     """dcm2niix binary'sini bul. PyInstaller bundle, env var veya PATH.
 
     Sıra:
-    1. SPINOSARC_DCM2NIIX env var (manuel override)
-    2. PyInstaller bundle: sys._MEIPASS/bin/dcm2niix
+    1. PyInstaller bundle: sys._MEIPASS/bin/dcm2niix
+    2. SPINOSARC_DCM2NIIX env var (dev-mode override)
     3. shutil.which('dcm2niix') - PATH'te kurulu mu
     """
-    # 1) Env var
-    env_path = os.environ.get('SPINOSARC_DCM2NIIX')
-    if env_path and Path(env_path).is_file():
-        return env_path
-
-    # 2) PyInstaller bundle
+    # 1) Frozen releases must use the bundled/tested converter.
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         bundled = Path(sys._MEIPASS) / 'bin' / 'dcm2niix'
         if bundled.is_file():
@@ -342,6 +363,11 @@ def _resolve_dcm2niix():
                 except Exception:
                     pass
             return str(bundled)
+
+    # 2) Dev-mode override
+    env_path = os.environ.get('SPINOSARC_DCM2NIIX')
+    if env_path and Path(env_path).is_file():
+        return env_path
 
     # 3) PATH
     found = shutil.which('dcm2niix')
@@ -683,7 +709,12 @@ def _write_series_nifti(series, output_path):
         volume.astype(np.float32),
         _dicom_affine(frames[0], slice_spacing=slice_spacing),
     )
-    image = nib.as_closest_canonical(image)
+    # Keep the DICOM storage axes: axis 2 is the acquired slice direction.
+    # The GUI's sagittal viewer and orientation detector intentionally use
+    # that convention; canonical RAS reorientation can move the sagittal
+    # slice axis to axis 0 and make the viewer scroll through the wrong plane.
+    image.set_qform(image.affine, code=1)
+    image.set_sform(image.affine, code=1)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     nib.save(image, str(output_path))

@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import sys
 import tempfile
 import unittest
@@ -39,10 +40,27 @@ class StandaloneRuntimeTests(unittest.TestCase):
         self.assertIn("--max-workers-nnunet", command)
         self.assertIn("--step1", command)
         self.assertIn("--iso", command)
+        self.assertIn("--keep-only", command)
+        self.assertIn("step1_canal", command)
+        self.assertIn("step1_levels", command)
 
-    def test_mps_error_detection_is_specific(self):
-        self.assertTrue(TotalSpineSegRunner._mps_failure("not implemented for 'MPS'"))
-        self.assertFalse(TotalSpineSegRunner._mps_failure("input file not found"))
+    def test_cpu_is_the_default_totalspineseg_device(self):
+        parameter = inspect.signature(TotalSpineSegRunner.run).parameters[
+            "device"]
+        self.assertEqual(parameter.default, "cpu")
+
+    def test_clear_output_removes_partial_worker_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            partial = output / "step1_levels"
+            partial.mkdir(parents=True)
+            (partial / "partial.nii.gz").touch()
+            (output / "stderr.txt").write_text("failed")
+
+            TotalSpineSegRunner._clear_output(output)
+
+            self.assertTrue(output.is_dir())
+            self.assertEqual(list(output.iterdir()), [])
 
 
 if __name__ == "__main__":

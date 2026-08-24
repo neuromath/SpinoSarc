@@ -1,5 +1,5 @@
 """SpinoSarc GUI v3 - axial + sagittal bidirectional locator + dural sac ROI (CSA)."""
-import sys, os, tempfile
+import sys, os, tempfile, logging
 from pathlib import Path
 import numpy as np
 import nibabel as nib
@@ -14,11 +14,20 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint
 from PyQt6.QtGui import QPixmap, QImage, QColor, QPainter, QPen, QPolygon
 from .analyzer import SpinoSarcAnalyzer, Demographics
 from . import dicom_loader
+from .totalspineseg.level_mapper import LevelMapper
 
 NAVY='#0A2540'; PRIMARY='#1E5AA8'; ACCENT='#00B8D4'
 SUCCESS='#0FA958'; WARNING='#F59E0B'; DANGER='#DC2626'
 LIGHT='#F8FAFC'; TXT_DK='#0F172A'; TXT_MD='#475569'; TXT_LT='#94A3B8'
 ROI_COLOR = (250, 204, 21)
+log = logging.getLogger(__name__)
+
+
+def _diagnostic_log_path():
+    return os.environ.get(
+        "SPINOSARC_LOG_PATH",
+        str(Path.home() / "Library" / "Logs" / "SpinoSarc" / "SpinoSarc.log"),
+    )
 
 MUSCLE_COLORS_RGB = {
     1:(239,68,68), 2:(59,130,246), 3:(16,185,129), 4:(139,92,246),
@@ -69,6 +78,9 @@ class ImageDisplay(QLabel):
         if level_lines is not None:
             self._level_lines = level_lines
         self._rotation = rotation
+        if img_array is None:
+            self.clear()
+            return
         self._refresh()
 
     def clear_level_lines(self):
@@ -327,6 +339,63 @@ class EngineLoaderThread(QThread):
             self.error.emit(str(e))
 
 
+class AnalysisThread(QThread):
+    """Run one MuscleMap analysis without blocking the Qt event loop."""
+    completed = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, analyzer, slice_path, demographics):
+        super().__init__()
+        self.analyzer = analyzer
+        self.slice_path = str(slice_path)
+        self.demographics = demographics
+
+    def run(self):
+        try:
+            result = self.analyzer.analyze(
+                self.slice_path, self.demographics)
+            self.completed.emit(result)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(exc))
+
+
+class MultiLevelAnalysisThread(QThread):
+    """Run sequential multi-level MuscleMap analysis in the background."""
+    completed = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, analyzer, axial_slices, canal_path, detected_levels,
+                 slice_nifti_producer, demographics):
+        super().__init__()
+        self.analyzer = analyzer
+        self.axial_slices = axial_slices
+        self.canal_path = canal_path
+        self.detected_levels = detected_levels
+        self.slice_nifti_producer = slice_nifti_producer
+        self.demographics = demographics
+
+    def run(self):
+        try:
+            from .totalspineseg.multi_level_analyzer import MultiLevelAnalyzer
+
+            analyzer = MultiLevelAnalyzer(
+                self.analyzer, self.axial_slices, self.canal_path)
+            result = analyzer.analyze_all(
+                self.detected_levels,
+                slice_nifti_producer=self.slice_nifti_producer,
+                demographics=self.demographics,
+                progress_callback=self.progress.emit,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(exc))
+
+
 class DicomLoaderThread(QThread):
     """Synapse klasörünü scan + convert et arka planda (UI takılmasın)."""
     finished = pyqtSignal(dict)
@@ -375,7 +444,10 @@ class LevelDetectionThread(QThread):
             result = runner.run(
                 sagittal_nifti_path=self.sagittal_nifti,
                 output_dir=self.output_dir,
-                device="mps",
+                # TotalSpineSeg officially supports CPU/CUDA.  CPU is the
+                # deterministic Apple-Silicon path; MPS was the source of
+                # unsupported-operator and partial-output failures.
+                device="cpu",
                 step1_only=True,
                 iso=True,
                 progress_callback=self.progress.emit,
@@ -546,6 +618,10 @@ class SpinoSarcWindow(QMainWindow):
         self.is_volume = False
         self.current_slice_idx = 0
         self.last_result = None
+        self.multi_level_result = None
+        self.detected_levels = None
+        self.canal_nifti_path = None
+        self.sagittal_nifti_path = None
         self.axial_rotation = 0
         self.sagittal_rotation = 1
         # Station-based multi-station axial state
@@ -816,13 +892,18 @@ class SpinoSarcWindow(QMainWindow):
         self.engine_status.setStyleSheet("color: " + SUCCESS + "; font-size: 11px; font-weight: 600;")
         if self.axial_data is not None or self.axial_slices:
             self.analyze_btn.setEnabled(True)
-            self.detect_levels_btn.setEnabled(True)
+            self.detect_levels_btn.setEnabled(
+                bool(self.sagittal_nifti_path) and bool(self.axial_slices))
             self.new_case_btn.setEnabled(True)
 
     def _on_engine_error(self, err):
         self.engine_status.setText("Model failed")
         self.engine_status.setStyleSheet("color: " + DANGER + "; font-size: 11px; font-weight: 600;")
-        QMessageBox.critical(self, "Model Error", "Failed to load model:\n" + err)
+        log.error("Model load failed: %s", err)
+        QMessageBox.critical(
+            self, "Model Error",
+            "Failed to load model:\n" + err +
+            "\n\nDiagnostic log:\n" + _diagnostic_log_path())
 
     def load_files(self, paths):
         """paths: list. NIfTI dosya yolları VEYA tek klasör yolu olabilir."""
@@ -840,6 +921,13 @@ class SpinoSarcWindow(QMainWindow):
         self.axial_data = None
         self.axial_affine = None
         self.axial_header = None
+        self.last_result = None
+        self.multi_level_result = None
+        self.detected_levels = None
+        self.canal_nifti_path = None
+        self.sagittal_nifti_path = None
+        self.levels_list.clear()
+        self.analyze_all_btn.setEnabled(False)
 
         self._dicom_folder = folder
         self.status_label.setText("Scanning DICOM folder, please wait...")
@@ -930,6 +1018,7 @@ class SpinoSarcWindow(QMainWindow):
                 import traceback; traceback.print_exc()
                 self.sagittal_data = None
                 self.sagittal_affine = None
+                self.sagittal_nifti_path = None
         else:
             self.sagittal_data = None
             self.sagittal_nifti_path = None
@@ -970,25 +1059,37 @@ class SpinoSarcWindow(QMainWindow):
         self.file_info.setText(info)
         self.status_label.setText(
             f"Loaded {n} DICOM slices (sorted by InstanceNumber). "
-            f"Draw ROI, click Analyze.")
+            f"Select a slice and click Analyze.")
         self.new_case_btn.setEnabled(True)
-        self.detect_levels_btn.setEnabled(True)
+        self.detect_levels_btn.setEnabled(bool(self.sagittal_nifti_path))
+        self.levels_status_label.setText(
+            "Ready to detect lumbar levels."
+            if self.sagittal_nifti_path
+            else "A sagittal series is required for level detection."
+        )
         if self.analyzer is not None:
             self.analyze_btn.setEnabled(True)
 
     def _on_dicom_error(self, err):
         self.drop_zone.setEnabled(True)
         self.status_label.setText("DICOM error: " + err[:200])
+        log.error("DICOM loading failed: %s", err)
         QMessageBox.critical(self, "DICOM error",
             "DICOM loading failed:\n" + err +
-            "\n\nMake sure dcm2niix is installed:\n"
-            "conda install -c conda-forge dcm2niix")
+            "\n\nDiagnostic log:\n" + _diagnostic_log_path())
 
     def _load_nifti_files(self, paths):
         try:
             # NIfTI dosya drop yolu: DICOM-mode state'ini temizle
             # (even if not needed, prevent mode confusion)
             self.axial_slices = []
+            self.last_result = None
+            self.multi_level_result = None
+            self.detected_levels = None
+            self.canal_nifti_path = None
+            self.sagittal_nifti_path = None
+            self.levels_list.clear()
+            self.analyze_all_btn.setEnabled(False)
 
             axial_path = None; sagittal_path = None
             for p in paths:
@@ -1046,6 +1147,7 @@ class SpinoSarcWindow(QMainWindow):
                 self.sag_lbl.setText("SAGITTAL")
             else:
                 self.sagittal_data = None; self.sagittal_affine = None
+                self.sagittal_nifti_path = None
                 self.sag_slider.setEnabled(False)
                 self.sag_slider.setRange(0, 0)
                 self.sag_slice_label.setText("Sagittal: -")
@@ -1065,9 +1167,14 @@ class SpinoSarcWindow(QMainWindow):
             if sagittal_path:
                 info += "   +sagittal: " + Path(sagittal_path).name
             self.file_info.setText(info)
-            self.status_label.setText("File(s) loaded. Draw dural sac ROI, enter demographics, click Analyze.")
+            self.status_label.setText(
+                "File(s) loaded. Enter demographics and click Analyze.")
             self.new_case_btn.setEnabled(True)
-            self.detect_levels_btn.setEnabled(True)
+            self.detect_levels_btn.setEnabled(
+                bool(self.sagittal_nifti_path) and bool(self.axial_slices))
+            self.levels_status_label.setText(
+                "Level detection requires a DICOM axial series plus sagittal input."
+            )
             if self.analyzer is not None:
                 self.analyze_btn.setEnabled(True)
         except Exception as e:
@@ -1442,6 +1549,9 @@ class SpinoSarcWindow(QMainWindow):
 
         self.detect_levels_btn.setEnabled(False)
         self.detect_levels_btn.setText("Detecting…")
+        self.analyze_btn.setEnabled(False)
+        self.analyze_all_btn.setEnabled(False)
+        self.new_case_btn.setEnabled(False)
         self.levels_status_label.setText(
             "Preparing the built-in level detector…"
         )
@@ -1471,14 +1581,26 @@ class SpinoSarcWindow(QMainWindow):
         """Parse TotalSpineSeg output and update the viewers on the UI thread."""
         self.detect_levels_btn.setEnabled(True)
         self.detect_levels_btn.setText("Detect Levels")
+        self.analyze_btn.setEnabled(self.analyzer is not None)
+        self.new_case_btn.setEnabled(True)
 
-        if not result["success"]:
-            self.detect_levels_btn.setEnabled(True)
-            self.detect_levels_btn.setText("Detect Levels")
+        if not result.get("success"):
+            error = result.get('error', 'unknown error')
+            details = (result.get("stderr") or result.get("stdout") or "").strip()
             self.levels_status_label.setText(
-                f"TotalSpineSeg failed: {result.get('error', 'unknown error')}"
+                f"TotalSpineSeg failed: {error}"
             )
-            print("[TSS stderr]", result.get("stderr", "")[-500:])
+            log.error("TotalSpineSeg failed: %s\n%s", error, details[-8000:])
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("Level Detection Error")
+            box.setText("Lumbar level detection could not be completed.")
+            box.setInformativeText(
+                f"{error}\n\nDiagnostic log:\n{_diagnostic_log_path()}"
+            )
+            if details:
+                box.setDetailedText(details[-12000:])
+            box.exec()
             return
 
         duration = result["duration_sec"]
@@ -1489,11 +1611,22 @@ class SpinoSarcWindow(QMainWindow):
             mapper = LevelMapper()
             levels = mapper.parse(out_dir, sag_nifti)
             levels = mapper.map_to_axial(levels, self.axial_slices)
+            if not levels:
+                raise ValueError(
+                    "No lumbar disc levels were found in the sagittal scan."
+                )
         except Exception as e:
             import traceback; traceback.print_exc()
-            self.detect_levels_btn.setEnabled(True)
-            self.detect_levels_btn.setText("Detect Levels")
             self.levels_status_label.setText(f"Parsing error: {e}")
+            log.exception("Could not parse TotalSpineSeg level output")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("Level Detection Error")
+            box.setText("Level detection finished, but its output was invalid.")
+            box.setInformativeText(
+                f"{e}\n\nDiagnostic log:\n{_diagnostic_log_path()}"
+            )
+            box.exec()
             return
 
         # ---- Canal CSA per level (auto dural sac) ----
@@ -1546,7 +1679,7 @@ class SpinoSarcWindow(QMainWindow):
         total = len(levels)
         self.levels_status_label.setText(
             f"Detected {total} levels - {covered} covered by axial volume "
-            f"({duration:.0f}s)"
+            f"({duration:.0f}s, {result.get('device', 'cpu').upper()})"
         )
 
         for name, info in levels.items():
@@ -1574,6 +1707,9 @@ class SpinoSarcWindow(QMainWindow):
 
         self.detect_levels_btn.setEnabled(True)
         self.detect_levels_btn.setText("Detect Levels")
+        self.analyze_btn.setEnabled(self.analyzer is not None)
+        self.analyze_all_btn.setEnabled(True)
+        self.new_case_btn.setEnabled(True)
         print(f"[TSS] Done. {covered}/{total} levels covered.")
 
         # Save canal NIfTI path for axial overlay - match by input basename
@@ -1679,39 +1815,57 @@ class SpinoSarcWindow(QMainWindow):
                 "Multi-level analysis requires a DICOM axial series.")
             return
 
-        from .totalspineseg.multi_level_analyzer import MultiLevelAnalyzer
-
         demo = self._get_demographics()
         self.analyze_all_btn.setEnabled(False)
         self.analyze_all_btn.setText("Analyzing all levels...")
+        self.analyze_btn.setEnabled(False)
+        self.detect_levels_btn.setEnabled(False)
+        self.new_case_btn.setEnabled(False)
         self.status_label.setText("Analyzing all levels...")
-        QApplication.processEvents()
 
-        def _progress(msg):
-            self.status_label.setText(msg)
-            QApplication.processEvents()
+        self.multi_analysis_thread = MultiLevelAnalysisThread(
+            self.analyzer,
+            self.axial_slices,
+            canal_path,
+            detected,
+            self._make_slice_nifti,
+            demo,
+        )
+        self.multi_analysis_thread.progress.connect(self.status_label.setText)
+        self.multi_analysis_thread.completed.connect(
+            self._on_multi_analysis_done)
+        self.multi_analysis_thread.error.connect(
+            self._on_multi_analysis_error)
+        self.multi_analysis_thread.finished.connect(
+            self._on_multi_analysis_finished)
+        self.multi_analysis_thread.finished.connect(
+            self.multi_analysis_thread.deleteLater)
+        self.multi_analysis_thread.start()
 
-        try:
-            mla = MultiLevelAnalyzer(self.analyzer, self.axial_slices, canal_path)
-            result = mla.analyze_all(
-                detected,
-                slice_nifti_producer=self._make_slice_nifti,
-                demographics=demo,
-                progress_callback=_progress,
-            )
-            self.multi_level_result = result
-            self._show_multi_level_results(result)
-            self.save_pdf_btn.setEnabled(True)
-            self.export_excel_btn.setEnabled(True)
-            self.status_label.setText("Multi-level analysis complete.")
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            QMessageBox.critical(self, "Analyze All Levels",
-                f"Multi-level analysis failed:\n{e}")
-            self.status_label.setText("Multi-level analysis failed.")
-        finally:
-            self.analyze_all_btn.setEnabled(True)
-            self.analyze_all_btn.setText("Analyze All Levels")
+    def _on_multi_analysis_done(self, result):
+        self.multi_level_result = result
+        self._show_multi_level_results(result)
+        self.save_pdf_btn.setEnabled(True)
+        self.export_excel_btn.setEnabled(True)
+        self.status_label.setText("Multi-level analysis complete.")
+
+    def _on_multi_analysis_error(self, err):
+        log.error("Multi-level analysis failed: %s", err)
+        self.status_label.setText("Multi-level analysis failed.")
+        QMessageBox.critical(
+            self,
+            "Analyze All Levels",
+            f"Multi-level analysis failed:\n{err}\n\n"
+            f"Diagnostic log:\n{_diagnostic_log_path()}",
+        )
+
+    def _on_multi_analysis_finished(self):
+        self.analyze_all_btn.setEnabled(bool(self.detected_levels))
+        self.analyze_all_btn.setText("Analyze All Levels")
+        self.analyze_btn.setEnabled(self.analyzer is not None)
+        self.detect_levels_btn.setEnabled(
+            bool(self.sagittal_nifti_path) and bool(self.axial_slices))
+        self.new_case_btn.setEnabled(True)
 
     def _show_multi_level_results(self, result):
         """Display multi-level results in the levels_list (temporary view)."""
@@ -1796,21 +1950,37 @@ class SpinoSarcWindow(QMainWindow):
 
         demo = self._get_demographics()
         self.analyze_btn.setEnabled(False)
+        self.analyze_all_btn.setEnabled(False)
+        self.detect_levels_btn.setEnabled(False)
+        self.new_case_btn.setEnabled(False)
         self.status_label.setText("Analyzing...")
-        QApplication.processEvents()
-        try:
-            result = self.analyzer.analyze(slice_path, demo)
-            self._on_analysis_done(result)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            self._on_analysis_error(str(e))
+        self.analysis_thread = AnalysisThread(
+            self.analyzer, slice_path, demo)
+        self.analysis_thread.completed.connect(self._on_analysis_done)
+        self.analysis_thread.error.connect(self._on_analysis_error)
+        self.analysis_thread.finished.connect(
+            self.analysis_thread.deleteLater)
+        self.analysis_thread.start()
 
     def _on_analysis_done(self, result):
+        try:
+            self._apply_analysis_result(result)
+        except Exception as exc:
+            log.exception("Could not display analysis result")
+            self._on_analysis_error(str(exc))
+
+    def _apply_analysis_result(self, result):
         self.last_result = result
         self.analyze_btn.setEnabled(True)
+        self.analyze_all_btn.setEnabled(bool(self.detected_levels))
+        self.detect_levels_btn.setEnabled(
+            bool(self.sagittal_nifti_path) and bool(self.axial_slices))
+        self.new_case_btn.setEnabled(True)
         self.save_pdf_btn.setEnabled(True)
         self.export_excel_btn.setEnabled(True)
         self.status_label.setText("Analysis complete.")
+        current_device = str(self.analyzer.engine.device)
+        self.engine_status.setText("Model ready (" + current_device + ")")
         seg = result['segmentation_mask']
         if seg.ndim == 3:
             seg = seg[:, :, 0]
@@ -1835,10 +2005,13 @@ class SpinoSarcWindow(QMainWindow):
 
         # DICOM mode: overlay segmentation on original DICOM pixel array,
         # so pre- and post-analysis views match exactly.
-        # Mask comes from dcm2niix LAS NIfTI -> rotate by k=1 to align with DICOM voxel.
+        # The selected frame is written directly to NIfTI and MONAI inverts its
+        # transforms back to that array space, so no unconditional rotation is
+        # valid here.
         if self.axial_slices:
             dicom_img = self.axial_slices[self.current_slice_idx]['pixel_array']
-            seg_aligned = np.rot90(seg, k=1)
+            seg_aligned = dicom_loader.align_segmentation_to_frame(
+                seg, dicom_img.shape)
             self.axial_display.set_image(dicom_img, overlay_mask=seg_aligned,
                                          rotation=self.axial_rotation,
                                          canal_overlay=canal_mask_for_overlay)
@@ -1869,8 +2042,17 @@ class SpinoSarcWindow(QMainWindow):
 
     def _on_analysis_error(self, err):
         self.analyze_btn.setEnabled(True)
+        self.analyze_all_btn.setEnabled(bool(self.detected_levels))
+        self.detect_levels_btn.setEnabled(
+            bool(self.sagittal_nifti_path) and bool(self.axial_slices))
+        self.new_case_btn.setEnabled(True)
         self.status_label.setText("Analysis failed: " + str(err))
-        QMessageBox.critical(self, "Analysis Error", str(err))
+        log.error("Analysis failed: %s", err)
+        QMessageBox.critical(
+            self,
+            "Analysis Error",
+            f"{err}\n\nDiagnostic log:\n{_diagnostic_log_path()}",
+        )
 
     def _gui_demographics_dict(self):
         """Collect demographics from the GUI inputs as a plain dict for reports."""
@@ -1938,7 +2120,8 @@ class SpinoSarcWindow(QMainWindow):
             import openpyxl
         except ImportError:
             QMessageBox.critical(self, "Missing dependency",
-                "openpyxl is not installed. Install with: pip install openpyxl")
+                "The bundled Excel export component is unavailable.\n\n"
+                "Diagnostic log:\n" + _diagnostic_log_path())
             return
 
         # Multi-level report takes priority if a multi-level analysis exists.
@@ -2100,6 +2283,20 @@ class SpinoSarcWindow(QMainWindow):
 
     def _on_new_case(self):
         """Yeni vaka icin tum state'i temizle, baslangic durumuna don."""
+        for thread_name in (
+            "analysis_thread", "multi_analysis_thread",
+            "level_detection_thread", "_dicom_thread", "_dicom_thread2",
+        ):
+            thread = getattr(self, thread_name, None)
+            try:
+                if thread is not None and thread.isRunning():
+                    QMessageBox.warning(
+                        self, "Operation in progress",
+                        "Please wait for the current operation to finish.")
+                    return
+            except RuntimeError:
+                pass
+
         # State temizligi
         self.axial_slices = []
         self.axial_data = None
@@ -2113,6 +2310,10 @@ class SpinoSarcWindow(QMainWindow):
         self.is_volume = False
         self.current_slice_idx = 0
         self.last_result = None
+        self.multi_level_result = None
+        self.detected_levels = None
+        self.canal_nifti_path = None
+        self.sagittal_nifti_path = None
         # UI temizligi
         self.axial_display.set_image(None)
         self.sagittal_display.set_image(None)
@@ -2128,9 +2329,18 @@ class SpinoSarcWindow(QMainWindow):
         self.weight_input.setValue(0)
         # Sonuc tablosu temizle
         self.muscle_table.setRowCount(0)
+        self.levels_list.clear()
+        self.levels_status_label.setText(
+            "Load a case to enable level detection.")
+        self.risk_label.setText("-")
+        self.risk_label.setStyleSheet(
+            "font-size: 18px; font-weight: 700; color: gray;")
+        self.pmi_label.setText("PMI: -")
         self._reset_csa_display()
         # Butonlar
         self.analyze_btn.setEnabled(False)
+        self.analyze_all_btn.setEnabled(False)
+        self.detect_levels_btn.setEnabled(False)
         self.save_pdf_btn.setEnabled(False)
         self.export_excel_btn.setEnabled(False)
         self.new_case_btn.setEnabled(False)

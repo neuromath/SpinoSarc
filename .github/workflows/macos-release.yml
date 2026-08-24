@@ -7,7 +7,7 @@ on:
       version:
         description: Release version without the v prefix
         required: true
-        default: 0.3.0
+        default: 0.3.1
   push:
     tags:
       - "v*"
@@ -18,7 +18,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 150
     env:
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -38,7 +38,7 @@ jobs:
           elif [[ -n "${{ inputs.version }}" ]]; then
             VERSION="${{ inputs.version }}"
           else
-            VERSION="0.3.0"
+            VERSION="0.3.1"
           fi
           echo "SPINOSARC_VERSION=$VERSION" >> "$GITHUB_ENV"
 
@@ -111,3 +111,4 @@ jobs:
               --title "SpinoSarc $SPINOSARC_VERSION"
           fi
           gh release upload "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --clobber
+
